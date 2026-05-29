@@ -34,6 +34,9 @@ from PyQt6.QtGui import (
     QImage, QPixmap, QFont, QPainterPath
 )
 
+from agents import Agent as CoreAgent, AgentState, AgentProfile
+from spawner import spawn_agents
+
 # ── Simulation constants ───────────────────────────────────────────────
 DT              = 0.05      # seconds per tick
 AGENT_RADIUS    = 6         # pixels
@@ -118,37 +121,47 @@ class MemoryEntry:
 #  Agent
 # ══════════════════════════════════════════════════════════════════════
 
-class Agent:
+class Agent(CoreAgent):
     _id_counter = 0
 
     def __init__(self, x: float, y: float, walk_map: WalkMap):
         Agent._id_counter += 1
-        self.id = Agent._id_counter
+
+        profile = random.choice(list(AgentProfile))
+        super().__init__(
+            id=Agent._id_counter,
+            pos=np.array([x, y], dtype=float),
+            velocity=np.zeros(2, dtype=float),
+            facing=random.uniform(0, math.tau),
+            panic=0.0,
+            memory={},
+            goal=None,
+            state=AgentState.CALM,
+            profile=profile,
+            speed_max=SPEED_BASE * random.uniform(1 - SPEED_VARIANCE, 1 + SPEED_VARIANCE),
+            shoulder_radius=AGENT_RADIUS / 20.0,
+        )
 
         self.x = x
         self.y = y
-        self.speed = SPEED_BASE * random.uniform(1 - SPEED_VARIANCE, 1 + SPEED_VARIANCE)
+        self.speed = self.speed_max
 
-        # Direction in radians (0 = right, π/2 = down)
-        self.angle = random.uniform(0, math.tau)
+        self.angle = self.facing
         self.vx = math.cos(self.angle) * self.speed
         self.vy = math.sin(self.angle) * self.speed
 
         self.walk_map = walk_map
-        self.memory: List[MemoryEntry] = []         # what this agent has seen
-        self.known_map_cells: set = set()           # grid cells explored (10px grid)
+        self.memory_entries: List[MemoryEntry] = []
+        self.known_map_cells: set = set()
 
-        self.panic = 0.0                            # 0–1
         self.last_sweep_time = random.uniform(0, CIRCLE_SWEEP_INTERVAL)
         self.sim_time = 0.0
 
-        # For smooth steering
         self._target_angle = self.angle
         self._wander_timer = random.uniform(0, 2.0)
 
-        # For inspector display
         self.selected = False
-        self.fov_visible_ids: set = set()           # IDs of agents in FOV right now
+        self.fov_visible_ids: set = set()
 
     # ── movement ─────────────────────────────────────────────────────
 
@@ -189,7 +202,8 @@ class Agent:
         # 5. Compose velocity
         wx = math.cos(self.angle) * self.speed + rx + sx
         wy = math.sin(self.angle) * self.speed + ry + sy
-
+        self.vx, self.vy = wx, wy
+        
         # 6. Propose new position, reject if into wall
         nx, ny = self.x + wx * dt, self.y + wy * dt
         if self.walk_map.is_walkable(nx, ny):
@@ -205,6 +219,11 @@ class Agent:
             else:
                 self._target_angle = self.angle + math.pi + random.uniform(-0.5, 0.5)
 
+        # Sync local visual fields back into shared core agent fields
+        self.pos = np.array([self.x, self.y], dtype=float)
+        self.velocity = np.array([self.vx, self.vy], dtype=float)
+        self.facing = self.angle
+        
         # 7. Update explored cells (10px grid)
         cell = (int(self.x) // 10, int(self.y) // 10)
         self.known_map_cells.add(cell)
@@ -215,8 +234,8 @@ class Agent:
             self.last_sweep_time = sim_time
 
         # 9. Decay old memories
-        self.memory = [
-            m for m in self.memory
+        self.memory_entries = [
+            m for m in self.memory_entries
             if sim_time - m.time_seen < MEMORY_DECAY
         ]
 
@@ -244,13 +263,14 @@ class Agent:
 
     def _add_memory(self, kind: str, pos: Tuple[float, float], t: float):
         """Add or refresh memory entry (deduplicates within 20px)."""
-        for m in self.memory:
+        for m in self.memory_entries:
             if m.kind == kind and math.hypot(m.position[0] - pos[0],
                                               m.position[1] - pos[1]) < 20:
                 m.time_seen = t
                 m.confidence = 1.0
                 return
-        self.memory.append(MemoryEntry(kind, pos, t))
+        self.memory_entries.append(MemoryEntry(kind, pos, t))
+        self.memory[kind] = pos
 
     def add_exit_memory(self, pos: Tuple[float, float], t: float):
         self._add_memory("exit", pos, t)
@@ -292,22 +312,19 @@ class Simulation:
 
     def _spawn_agents(self, cfg: dict):
         Agent._id_counter = 0
+        self.agents.clear()
 
         zones = cfg.get("zones", [])
-
         if not zones:
             self._scatter_random(100)
+            print(f"Spawned {len(self.agents)} agents")
             return
 
-        # All walkable pixels — pre-sampled once
         ys, xs = np.where(self.walk_map.walkable)
         if len(xs) == 0:
             print("Warning: no walkable pixels found in mask!")
             return
 
-        # Try to rebuild zone labels so agents spawn inside the right zone.
-        # If that fails we fall back to scattering across ALL walkable pixels
-        # (still correct count, just not zone-localised).
         mask_path = cfg.get("mask_path", "")
         zone_labels = None
         if Path(mask_path).exists():
@@ -317,27 +334,22 @@ class Simulation:
             except Exception as e:
                 print(f"Zone label rebuild failed ({e}), using global walkable pool")
 
-        # Build a flat list of walkable pixel indices for fast random sampling
         walkable_pool = list(zip(xs.tolist(), ys.tolist()))
 
         for zone in zones:
             d = zone.get("density_index", 1.0)
             if d <= 0:
-                continue   # density_index 0 = outside/ignore
+                continue
 
             count = zone.get("agents", 0)
             if count <= 0:
                 continue
 
-            # Pick the pixel pool for this zone
             if zone_labels is not None:
                 zid = zone["zone_id"]
                 zm = (zone_labels == zid) & self.walk_map.walkable
                 zy, zx = np.where(zm)
-                if len(zx) == 0:
-                    pool = walkable_pool   # fallback
-                else:
-                    pool = list(zip(zx.tolist(), zy.tolist()))
+                pool = list(zip(zx.tolist(), zy.tolist())) if len(zx) > 0 else walkable_pool
             else:
                 pool = walkable_pool
 
@@ -345,7 +357,7 @@ class Simulation:
                 px, py = random.choice(pool)
                 self.agents.append(Agent(float(px), float(py), self.walk_map))
 
-        print(f"Spawned {len(self.agents)} agents")
+            print(f"Spawned {len(self.agents)} agents")
 
     def _scatter_random(self, n: int):
         ys, xs = np.where(self.walk_map.walkable)
@@ -501,7 +513,7 @@ class SimView(QWidget):
 
             # Memory dots (selected agent only)
             if self.show_memory and a.selected:
-                for m in a.memory:
+                for m in a.memory_entries:
                     mx2, my2 = self._w2s(m.position[0], m.position[1])
                     age = (self.sim.sim_time - m.time_seen) / MEMORY_DECAY
                     alpha = int(180 * (1 - age))
@@ -596,11 +608,11 @@ class InspectorPanel(QFrame):
         self.cells_label.setText(f"Explored:   {len(agent.known_map_cells)} cells")
 
         self._clear_memory()
-        if not agent.memory:
+        if not agent.memory_entries:
             lbl = QLabel("  (nothing yet)")
             lbl.setStyleSheet("color:#555; font-size:8pt;")
             self.memory_layout.addWidget(lbl)
-        for m in sorted(agent.memory, key=lambda x: -x.time_seen):
+        for m in sorted(agent.memory_entries, key=lambda x: -x.time_seen):
             age = sim_time - m.time_seen
             text = (f"  [{m.kind:6s}]  ({m.position[0]:.0f},{m.position[1]:.0f})"
                     f"  {age:.1f}s ago")
