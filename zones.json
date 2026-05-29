@@ -1,6 +1,6 @@
 {
   "mask_path": "C:/Users/Asus/parser_model_addons/stitched_mask.png",
-  "base_density": 0.5,
+  "base_density": 0.2,
   "agent_scale": 1000,
   "zones": [
     {
@@ -29,385 +29,385 @@
       "zone_id": 9,
       "area_px": 4238,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 4,
       "zone_id": 10,
       "area_px": 7426,
       "density_index": 1.0,
-      "agents": 3
+      "agents": 1
     },
     {
       "zone_index": 5,
       "zone_id": 11,
       "area_px": 4917,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 6,
       "zone_id": 12,
       "area_px": 3597,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 7,
       "zone_id": 13,
       "area_px": 5792,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 1
     },
     {
       "zone_index": 8,
       "zone_id": 14,
       "area_px": 6064,
       "density_index": 1.0,
-      "agents": 3
+      "agents": 1
     },
     {
       "zone_index": 9,
       "zone_id": 15,
       "area_px": 11254,
       "density_index": 1.0,
-      "agents": 5
+      "agents": 2
     },
     {
       "zone_index": 10,
       "zone_id": 16,
       "area_px": 8943,
       "density_index": 1.0,
-      "agents": 4
+      "agents": 1
     },
     {
       "zone_index": 11,
       "zone_id": 17,
       "area_px": 20668,
       "density_index": 1.0,
-      "agents": 10
+      "agents": 4
     },
     {
       "zone_index": 12,
       "zone_id": 18,
       "area_px": 8032,
       "density_index": 1.0,
-      "agents": 4
+      "agents": 1
     },
     {
       "zone_index": 13,
       "zone_id": 19,
       "area_px": 5912,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 1
     },
     {
       "zone_index": 14,
       "zone_id": 20,
       "area_px": 4760,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 15,
       "zone_id": 21,
       "area_px": 6027,
       "density_index": 1.0,
-      "agents": 3
+      "agents": 1
     },
     {
       "zone_index": 16,
       "zone_id": 22,
       "area_px": 2980,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 17,
       "zone_id": 24,
       "area_px": 12965,
       "density_index": 1.0,
-      "agents": 6
+      "agents": 2
     },
     {
       "zone_index": 18,
       "zone_id": 25,
       "area_px": 4504,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 19,
       "zone_id": 26,
       "area_px": 10285,
       "density_index": 1.0,
-      "agents": 5
+      "agents": 2
     },
     {
       "zone_index": 20,
       "zone_id": 28,
       "area_px": 3326,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 21,
       "zone_id": 29,
       "area_px": 8573,
       "density_index": 1.0,
-      "agents": 4
+      "agents": 1
     },
     {
       "zone_index": 22,
       "zone_id": 30,
       "area_px": 4572,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 23,
       "zone_id": 31,
       "area_px": 13587,
       "density_index": 1.0,
-      "agents": 6
+      "agents": 2
     },
     {
       "zone_index": 24,
       "zone_id": 32,
       "area_px": 8874,
       "density_index": 1.0,
-      "agents": 4
+      "agents": 1
     },
     {
       "zone_index": 25,
       "zone_id": 34,
       "area_px": 2934,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 26,
       "zone_id": 35,
       "area_px": 20853,
       "density_index": 1.0,
-      "agents": 10
+      "agents": 4
     },
     {
       "zone_index": 27,
       "zone_id": 37,
       "area_px": 4513,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 28,
       "zone_id": 39,
       "area_px": 8000,
       "density_index": 1.0,
-      "agents": 4
+      "agents": 1
     },
     {
       "zone_index": 29,
       "zone_id": 40,
       "area_px": 3090,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 30,
       "zone_id": 41,
       "area_px": 4283,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 31,
       "zone_id": 42,
       "area_px": 4116,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 32,
       "zone_id": 43,
       "area_px": 14180,
       "density_index": 1.0,
-      "agents": 7
+      "agents": 2
     },
     {
       "zone_index": 33,
       "zone_id": 44,
       "area_px": 3021,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 34,
       "zone_id": 45,
       "area_px": 3226,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 35,
       "zone_id": 46,
       "area_px": 3249,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 36,
       "zone_id": 48,
       "area_px": 7169,
       "density_index": 1.0,
-      "agents": 3
+      "agents": 1
     },
     {
       "zone_index": 37,
       "zone_id": 49,
       "area_px": 2991,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 38,
       "zone_id": 50,
       "area_px": 8084,
       "density_index": 1.0,
-      "agents": 4
+      "agents": 1
     },
     {
       "zone_index": 39,
       "zone_id": 51,
       "area_px": 4494,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 40,
       "zone_id": 53,
       "area_px": 2793,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 41,
       "zone_id": 54,
       "area_px": 2827,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 42,
       "zone_id": 55,
       "area_px": 2922,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 43,
       "zone_id": 56,
       "area_px": 2662,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 44,
       "zone_id": 57,
       "area_px": 2865,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 45,
       "zone_id": 59,
       "area_px": 4435,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 46,
       "zone_id": 60,
       "area_px": 8064,
       "density_index": 1.0,
-      "agents": 4
+      "agents": 1
     },
     {
       "zone_index": 47,
       "zone_id": 61,
       "area_px": 2806,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 48,
       "zone_id": 62,
       "area_px": 2555,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 49,
       "zone_id": 64,
       "area_px": 13591,
       "density_index": 1.0,
-      "agents": 6
+      "agents": 2
     },
     {
       "zone_index": 50,
       "zone_id": 65,
       "area_px": 26659,
       "density_index": 1.0,
-      "agents": 13
+      "agents": 5
     },
     {
       "zone_index": 51,
       "zone_id": 67,
       "area_px": 4630,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 0
     },
     {
       "zone_index": 52,
       "zone_id": 68,
       "area_px": 11219,
       "density_index": 1.0,
-      "agents": 5
+      "agents": 2
     },
     {
       "zone_index": 53,
       "zone_id": 69,
       "area_px": 5243,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 1
     },
     {
       "zone_index": 54,
       "zone_id": 71,
       "area_px": 14698,
       "density_index": 1.0,
-      "agents": 7
+      "agents": 2
     },
     {
       "zone_index": 55,
       "zone_id": 72,
       "area_px": 13590,
       "density_index": 1.0,
-      "agents": 6
+      "agents": 2
     },
     {
       "zone_index": 56,
       "zone_id": 74,
       "area_px": 3194,
       "density_index": 1.0,
-      "agents": 1
+      "agents": 0
     },
     {
       "zone_index": 57,
       "zone_id": 75,
       "area_px": 5938,
       "density_index": 1.0,
-      "agents": 2
+      "agents": 1
     }
   ]
 }
