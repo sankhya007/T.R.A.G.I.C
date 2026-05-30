@@ -19,42 +19,57 @@ import random
 import numpy as np
 import cv2
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
 from navmesh import NavMesh
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QFileDialog, QFrame, QSizePolicy, QScrollArea,
-    QMessageBox, QCheckBox, QDoubleSpinBox, QSlider
+    QMessageBox, QCheckBox, QSlider
 )
 from PyQt6.QtCore import Qt, QTimer, QPointF
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QPolygonF,
-    QImage, QPixmap, QFont, QPainterPath
+    QPainter, QColor, QPen, QBrush,
+    QImage, QPixmap, QPainterPath
 )
 
 from agents import Agent as CoreAgent, AgentState, AgentProfile
-from spawner import spawn_agents
 
 # ── Simulation constants ───────────────────────────────────────────────
-DT              = 0.05      # seconds per tick
-AGENT_RADIUS    = 6         # pixels
-FOV_DEGREES     = 120       # total field of view
-FOV_RANGE       = 80        # pixels — how far an agent can see
-PANIC_FOV_RANGE = 140       # pixels — wider look during circle sweep
-SPEED_BASE      = 35        # px/s nominal walk speed
-SPEED_VARIANCE  = 0.25      # ±25% speed variation per agent
-NEIGHBOR_RADIUS = 40        # px — social force range
-WALL_BUFFER     = AGENT_RADIUS + 2
-CIRCLE_SWEEP_INTERVAL = 3.0 # seconds — how often agents look around
-MEMORY_DECAY    = 120.0     # seconds — exit memories fade after this
+DT = 0.05
+AGENT_RADIUS = 6
+FOV_DEGREES = 120
+FOV_RANGE = 80
+PANIC_FOV_RANGE = 140
+SPEED_BASE = 35
+SPEED_VARIANCE = 0.25
+NEIGHBOR_RADIUS = 40
+WALL_BUFFER = AGENT_RADIUS + 2
+CIRCLE_SWEEP_INTERVAL = 3.0
+MEMORY_DECAY = 120.0
+RAY_COUNT = 12
+PANIC_SWEEP_THR = 0.35
+MEM_DEGRADE_THR = 0.70
+MEM_DEGRADE_P = 0.30
+MAX_KNOWN_CELLS = 400
+MAX_MEMORY_ENTRIES = 16
+
+# ── Panic model constants ──────────────────────────────────────────────
+PANIC_RADIUS = 140.0
+AWARE_HERD_WEIGHT = 0.30
+DISTRESS_HERD_WEIGHT = 0.60
+PANIC_HERD_WEIGHT = 1.00
+DISTRESS_FOV_DEG = 90.0
+PANIC_FOV_MIN_DEG = 60.0
+DISTRESS_RADIUS_SCALE = 0.85
+PANIC_RADIUS_SCALE = 0.70
+CALM_SPEED_SCALE = 0.95
+AWARE_SPEED_SCALE = 1.05
+DISTRESS_SPEED_SCALE = 1.18
+PANIC_SPEED_SCALE = 1.30
 # ──────────────────────────────────────────────────────────────────────
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  Walkability map
-# ══════════════════════════════════════════════════════════════════════
 
 class WalkMap:
     """Thin wrapper around a binary walkability image."""
@@ -62,24 +77,8 @@ class WalkMap:
         img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise FileNotFoundError(mask_path)
-        # White pixels = wall, black = walkable (typical stitched mask)
-        # Auto-detect convention by checking border pixels
-        # border_mean = (img[0, :].mean() + img[-1, :].mean() +
-        #                img[:, 0].mean() + img[:, -1].mean()) / 4
-        # if border_mean > 128:
-        #     # White border = wall, invert so walkable = True
-        #     self.walkable = img < 128
-        # else:
-        #     self.walkable = img > 128
-        
-        # In your mask: white = wall, black = walkable
-        # Force this convention directly, no auto-detection
         self.walkable = img < 128
-        
-        # this is done here tosee if teh agents spawn correctly n the zones in which they are meant to spawn in 
-        
         self.h, self.w = img.shape
-        # Pre-compute distance transform for wall-avoidance force
         walk_uint8 = self.walkable.astype(np.uint8) * 255
         self.dist = cv2.distanceTransform(walk_uint8, cv2.DIST_L2, 5)
 
@@ -90,43 +89,32 @@ class WalkMap:
         return bool(self.walkable[iy, ix])
 
     def wall_repulsion(self, x: float, y: float) -> Tuple[float, float]:
-        """Push agents away from walls based on distance transform."""
-        ix, iy = int(np.clip(x, 0, self.w - 1)), int(np.clip(y, 0, self.h - 1))
+        ix = int(np.clip(x, 0, self.w - 1))
+        iy = int(np.clip(y, 0, self.h - 1))
         d = self.dist[iy, ix]
         if d >= WALL_BUFFER * 2:
             return 0.0, 0.0
-        # Gradient of distance transform
-        gx = (self.dist[iy, min(ix + 1, self.w - 1)] -
-              self.dist[iy, max(ix - 1, 0)]) / 2
-        gy = (self.dist[min(iy + 1, self.h - 1), ix] -
-              self.dist[max(iy - 1, 0), ix]) / 2
+        gx = (self.dist[iy, min(ix + 1, self.w - 1)] - self.dist[iy, max(ix - 1, 0)]) / 2
+        gy = (self.dist[min(iy + 1, self.h - 1), ix] - self.dist[max(iy - 1, 0), ix]) / 2
         strength = max(0, (WALL_BUFFER * 2 - d)) / (WALL_BUFFER * 2)
         return gx * strength * 150, gy * strength * 150
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Memory entry
-# ══════════════════════════════════════════════════════════════════════
-
 @dataclass
 class MemoryEntry:
-    """A thing the agent has seen and remembered."""
-    kind: str                   # "exit" | "hazard" | "crowd"
+    kind: str
     position: Tuple[float, float]
-    time_seen: float            # simulation time when first seen
-    confidence: float = 1.0    # fades with time
+    time_seen: float
+    confidence: float = 1.0
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  Agent
-# ══════════════════════════════════════════════════════════════════════
 
 class Agent(CoreAgent):
     _id_counter = 0
 
-    def __init__(self, x: float, y: float, walk_map: WalkMap):
+    def __init__(self, x: float, y: float, walk_map: WalkMap,
+                 exits: Optional[Dict[int, Tuple[float, float]]] = None,
+                 hazards: Optional[Dict[int, Tuple[float, float]]] = None):
         Agent._id_counter += 1
-
         profile = random.choice(list(AgentProfile))
         super().__init__(
             id=Agent._id_counter,
@@ -141,153 +129,322 @@ class Agent(CoreAgent):
             speed_max=SPEED_BASE * random.uniform(1 - SPEED_VARIANCE, 1 + SPEED_VARIANCE),
             shoulder_radius=AGENT_RADIUS / 20.0,
         )
-
-        self.x = x
-        self.y = y
+        self.x, self.y = x, y
         self.speed = self.speed_max
-
         self.angle = self.facing
         self.vx = math.cos(self.angle) * self.speed
         self.vy = math.sin(self.angle) * self.speed
-
         self.walk_map = walk_map
+
+        self._exits = exits if exits is not None else {}
+        self._hazards = hazards if hazards is not None else {}
+
         self.memory_entries: List[MemoryEntry] = []
         self.known_map_cells: set = set()
 
+        self._sweep_active = False
+        self._sweep_tick = 0
+        self._sweep_total_ticks = math.ceil(360 / FOV_DEGREES)
+        self._sweep_angle_offset = 0.0
+        self._sweep_triggered = False
+        self.panic_delay_remaining = 0.0
+
         self.last_sweep_time = random.uniform(0, CIRCLE_SWEEP_INTERVAL)
         self.sim_time = 0.0
-
         self._target_angle = self.angle
         self._wander_timer = random.uniform(0, 2.0)
-
         self.selected = False
         self.fov_visible_ids: set = set()
 
-    # ── movement ─────────────────────────────────────────────────────
+        # PAC model parameters
+        self.alpha = {
+            AgentProfile.ADULT: 0.045,
+            AgentProfile.CHILD: 0.060,
+            AgentProfile.ELDERLY: 0.040,
+            AgentProfile.MOBILITY_IMPAIRED: 0.050,
+        }.get(profile, 0.045)
+
+        self.beta = {
+            AgentProfile.ADULT: 0.018,
+            AgentProfile.CHILD: 0.015,
+            AgentProfile.ELDERLY: 0.020,
+            AgentProfile.MOBILITY_IMPAIRED: 0.016,
+        }.get(profile, 0.018)
+
+        self.herd_weight = 0.0
+        self.goal_weight = 1.0
+        self.current_fov_deg = FOV_DEGREES
+        self.collision_scale = 1.0
+        self.pathfinding_quality = 1.0
+        self.panic_state_name = "CALM"
+
+    def _in_fov(self, tx: float, ty: float, angle_override: float = None) -> bool:
+        dx, dy = tx - self.x, ty - self.y
+        base = self.angle if angle_override is None else angle_override
+        angle_to = math.atan2(dy, dx)
+        diff = (angle_to - base + math.pi) % math.tau - math.pi
+        return abs(diff) <= math.radians(self.current_fov_deg / 2)
+
+    def _ray_clear(self, tx: float, ty: float) -> bool:
+        dx, dy = tx - self.x, ty - self.y
+        dist = math.hypot(dx, dy)
+        if dist < 1e-4:
+            return True
+        steps = int(min(dist, FOV_RANGE))
+        sx, sy = dx / dist, dy / dist
+        for i in range(1, steps + 1):
+            if not self.walk_map.is_walkable(self.x + sx * i, self.y + sy * i):
+                return False
+        return True
+
+    def _point_visible(self, tx: float, ty: float) -> bool:
+        return self._in_fov(tx, ty) and self._ray_clear(tx, ty)
+
+    # ── Panic model ──────────────────────────────────────────────────
+
+    def _nearest_hazard_distance(self) -> float:
+        if not self._hazards:
+            return float("inf")
+        return min(math.hypot(self.x - hx, self.y - hy) for hx, hy in self._hazards.values())
+
+    def _is_open_air_safe(self) -> bool:
+        return self._nearest_hazard_distance() > PANIC_RADIUS
+
+    def update_panic_pac(self, dt: float):
+        dist = self._nearest_hazard_distance()
+        hazard_signal = max(0.0, 1.0 - dist / PANIC_RADIUS) if math.isfinite(dist) else 0.0
+        open_air_dt = dt if self._is_open_air_safe() else 0.0
+
+        self.panic = float(np.clip(
+            self.panic + (self.alpha * hazard_signal) - (self.beta * open_air_dt),
+            0.0, 1.0
+        ))
+
+        self._apply_panic_state()
+
+    def _apply_panic_state(self):
+        if self.panic <= 0.2:
+            self.panic_state_name = "CALM"
+            self.state = AgentState.CALM
+            self.herd_weight = 0.0
+            self.goal_weight = 1.0
+            self.current_fov_deg = FOV_DEGREES
+            self.collision_scale = 1.0
+            self.pathfinding_quality = 1.0
+            self.speed = self.speed_max * CALM_SPEED_SCALE
+
+        elif self.panic <= 0.5:
+            self.panic_state_name = "AWARE"
+            self.state = AgentState.AWARE
+            self.herd_weight = AWARE_HERD_WEIGHT
+            self.goal_weight = 1.0 - self.herd_weight
+            self.current_fov_deg = FOV_DEGREES
+            self.collision_scale = 1.0
+            self.pathfinding_quality = 0.95
+            self.speed = self.speed_max * AWARE_SPEED_SCALE
+
+        elif self.panic <= 0.75:
+            self.panic_state_name = "DISTRESSED"
+            self.state = AgentState.PANICKING
+            self.herd_weight = DISTRESS_HERD_WEIGHT
+            self.goal_weight = 1.0 - self.herd_weight
+            self.current_fov_deg = DISTRESS_FOV_DEG
+            self.collision_scale = DISTRESS_RADIUS_SCALE
+            self.pathfinding_quality = 0.65
+            self.speed = self.speed_max * DISTRESS_SPEED_SCALE
+
+        else:
+            self.panic_state_name = "PANIC"
+            self.state = AgentState.PANICKING
+            self.herd_weight = PANIC_HERD_WEIGHT
+            self.goal_weight = 0.0
+            self.current_fov_deg = PANIC_FOV_MIN_DEG
+            self.collision_scale = PANIC_RADIUS_SCALE
+            self.pathfinding_quality = 0.25
+            self.speed = self.speed_max * PANIC_SPEED_SCALE
+
+    # ── Perception ───────────────────────────────────────────────────
+
+    def update_perception(self, sim_time: float):
+        for eid, epos in self._exits.items():
+            if math.hypot(epos[0] - self.x, epos[1] - self.y) <= FOV_RANGE and self._point_visible(*epos):
+                self._store_memory(eid, "exit", epos, sim_time)
+
+        for hid, hpos in self._hazards.items():
+            if math.hypot(hpos[0] - self.x, hpos[1] - self.y) <= FOV_RANGE and self._point_visible(*hpos):
+                self._store_memory(hid, "hazard", hpos, sim_time)
+
+    # ── Sweep logic ──────────────────────────────────────────────────
+
+    def check_sweeps(self, sim_time: float):
+        if (not self._sweep_triggered and self.panic >= PANIC_SWEEP_THR and self.panic_delay_remaining <= 0.0):
+            self._sweep_active = True
+            self._sweep_tick = 0
+            self._sweep_triggered = True
+            self._sweep_angle_offset = self.angle
+
+        if (not self._sweep_active and sim_time - self.last_sweep_time >= CIRCLE_SWEEP_INTERVAL):
+            self._sweep_active = True
+            self._sweep_tick = 0
+            self._sweep_angle_offset = self.angle
+            self.last_sweep_time = sim_time
+
+        if self._sweep_active:
+            self._do_sweep_tick(sim_time)
+
+    def _do_sweep_tick(self, sim_time: float):
+        tick_deg = 360.0 / self._sweep_total_ticks
+        scan_base = self._sweep_angle_offset + math.radians(tick_deg * self._sweep_tick)
+
+        for eid, epos in self._exits.items():
+            dist = math.hypot(epos[0] - self.x, epos[1] - self.y)
+            if dist <= PANIC_FOV_RANGE and self._in_fov(*epos, angle_override=scan_base) and self._ray_clear(*epos):
+                self._store_memory(eid, "exit", epos, sim_time)
+
+        for hid, hpos in self._hazards.items():
+            dist = math.hypot(hpos[0] - self.x, hpos[1] - self.y)
+            if dist <= PANIC_FOV_RANGE and self._in_fov(*hpos, angle_override=scan_base) and self._ray_clear(*hpos):
+                self._store_memory(hid, "hazard", hpos, sim_time)
+
+        self._sweep_tick += 1
+        if self._sweep_tick >= self._sweep_total_ticks:
+            self._sweep_active = False
+            self._sweep_tick = 0
+
+    def check_immediate_awareness(self, hazard_pos: Tuple[float, float]) -> bool:
+        if self._in_fov(*hazard_pos) and self._ray_clear(*hazard_pos):
+            self._sweep_triggered = True
+            return True
+        return False
+
+    # ── Memory ───────────────────────────────────────────────────────
+
+    def _store_memory(self, uid: int, kind: str, pos: Tuple[float, float], t: float):
+        self.memory[uid] = {"kind": kind, "pos": pos, "t": t, "certain": True}
+        for m in self.memory_entries:
+            if m.kind == kind and math.hypot(m.position[0] - pos[0], m.position[1] - pos[1]) < 20:
+                m.time_seen = t
+                m.confidence = 1.0
+                return
+        self.memory_entries.append(MemoryEntry(kind, pos, t))
+        if len(self.memory_entries) > MAX_MEMORY_ENTRIES:
+            self.memory_entries.sort(key=lambda m: m.time_seen, reverse=True)
+            self.memory_entries = self.memory_entries[:MAX_MEMORY_ENTRIES]
+
+    def manage_memory(self, all_agents: List['Agent'], sim_time: float):
+        self.memory_entries = [m for m in self.memory_entries if sim_time - m.time_seen < MEMORY_DECAY]
+        stale = [uid for uid, v in self.memory.items() if sim_time - v["t"] >= MEMORY_DECAY]
+        for k in stale:
+            del self.memory[k]
+
+        if self.panic > MEM_DEGRADE_THR and self.goal is not None:
+            if random.random() < self.panic * MEM_DEGRADE_P:
+                for v in self.memory.values():
+                    if v["kind"] == "exit" and v["pos"] == self.goal:
+                        v["certain"] = False
+                self._do_herding(all_agents)
+
+    def _do_herding(self, all_agents: List['Agent']):
+        best_d, best = float("inf"), None
+        for other in all_agents:
+            if other.id == self.id:
+                continue
+            d = math.hypot(self.x - other.x, self.y - other.y)
+            if d < FOV_RANGE and d < best_d and self._in_fov(other.x, other.y):
+                best_d, best = d, other
+
+        if best is None:
+            return
+
+        herd_angle = math.atan2(best.vy, best.vx)
+        goal_angle = self._target_angle
+
+        hx, hy = math.cos(herd_angle), math.sin(herd_angle)
+        gx, gy = math.cos(goal_angle), math.sin(goal_angle)
+
+        bx = self.herd_weight * hx + self.goal_weight * gx
+        by = self.herd_weight * hy + self.goal_weight * gy
+
+        if abs(bx) > 1e-6 or abs(by) > 1e-6:
+            self._target_angle = math.atan2(by, bx)
+
+    def add_exit_memory(self, pos: Tuple[float, float], t: float, uid: int = -1):
+        self._store_memory(uid if uid != -1 else hash(pos), "exit", pos, t)
+
+    def add_hazard_memory(self, pos: Tuple[float, float], t: float, uid: int = -1):
+        self._store_memory(uid if uid != -1 else hash(pos), "hazard", pos, t)
 
     def update(self, dt: float, all_agents: List['Agent'], sim_time: float):
         self.sim_time = sim_time
+        self.update_panic_pac(dt)
 
-        # 1. Wander — smoothly change direction now and then
+        if self.panic_delay_remaining > 0:
+            self.panic_delay_remaining = max(0.0, self.panic_delay_remaining - dt)
+
         self._wander_timer -= dt
         if self._wander_timer <= 0:
             self._target_angle = self.angle + random.gauss(0, 0.8)
             self._wander_timer = random.uniform(0.8, 2.5)
 
-        # 2. Smooth steer toward target angle
         diff = (self._target_angle - self.angle + math.pi) % math.tau - math.pi
-        self.angle += diff * min(1.0, dt * 4)
-        self.angle %= math.tau
+        self.angle = (self.angle + diff * min(1.0, dt * 4)) % math.tau
 
-        # 3. Wall repulsion force
         rx, ry = self.walk_map.wall_repulsion(self.x, self.y)
 
-        # 4. Agent–agent separation force (social force)
         sx, sy = 0.0, 0.0
         self.fov_visible_ids.clear()
+        effective_neighbor_radius = NEIGHBOR_RADIUS * self.collision_scale
+
         for other in all_agents:
             if other.id == self.id:
                 continue
             dx, dy = self.x - other.x, self.y - other.y
             dist = math.hypot(dx, dy)
-            if dist < NEIGHBOR_RADIUS and dist > 0:
-                # Social separation
-                push = max(0, (NEIGHBOR_RADIUS - dist)) / NEIGHBOR_RADIUS
+            if dist < effective_neighbor_radius and dist > 0:
+                push = max(0, (effective_neighbor_radius - dist)) / max(effective_neighbor_radius, 1e-6)
                 sx += (dx / dist) * push * 60
                 sy += (dy / dist) * push * 60
-            # FOV check
             if dist < FOV_RANGE and self._in_fov(other.x, other.y):
                 self.fov_visible_ids.add(other.id)
 
-        # 5. Compose velocity
+        if self.herd_weight > 0.0:
+            self._do_herding(all_agents)
+
         wx = math.cos(self.angle) * self.speed + rx + sx
         wy = math.sin(self.angle) * self.speed + ry + sy
         self.vx, self.vy = wx, wy
-        
-        # 6. Propose new position, reject if into wall
+
         nx, ny = self.x + wx * dt, self.y + wy * dt
         if self.walk_map.is_walkable(nx, ny):
             self.x, self.y = nx, ny
+        elif self.walk_map.is_walkable(nx, self.y):
+            self.x = nx
+            self._target_angle = math.atan2(-wy, wx)
+        elif self.walk_map.is_walkable(self.x, ny):
+            self.y = ny
+            self._target_angle = math.atan2(wy, -wx)
         else:
-            # Bounce — try axis-aligned slides
-            if self.walk_map.is_walkable(nx, self.y):
-                self.x = nx
-                self._target_angle = math.atan2(-wy, wx)
-            elif self.walk_map.is_walkable(self.x, ny):
-                self.y = ny
-                self._target_angle = math.atan2(wy, -wx)
-            else:
-                self._target_angle = self.angle + math.pi + random.uniform(-0.5, 0.5)
+            self._target_angle = self.angle + math.pi + random.uniform(-0.5, 0.5)
 
-        # Sync local visual fields back into shared core agent fields
         self.pos = np.array([self.x, self.y], dtype=float)
         self.velocity = np.array([self.vx, self.vy], dtype=float)
         self.facing = self.angle
-        
-        # 7. Update explored cells (10px grid)
-        cell = (int(self.x) // 10, int(self.y) // 10)
-        self.known_map_cells.add(cell)
 
-        # 8. Periodic circle sweep — scan all around
-        if sim_time - self.last_sweep_time >= CIRCLE_SWEEP_INTERVAL:
-            self._circle_sweep(all_agents, sim_time)
-            self.last_sweep_time = sim_time
+        if len(self.known_map_cells) < MAX_KNOWN_CELLS:
+            self.known_map_cells.add((int(self.x) // 10, int(self.y) // 10))
 
-        # 9. Decay old memories
-        self.memory_entries = [
-            m for m in self.memory_entries
-            if sim_time - m.time_seen < MEMORY_DECAY
-        ]
+        self.update_perception(sim_time)
+        self.check_sweeps(sim_time)
+        self.manage_memory(all_agents, sim_time)
 
-    def _in_fov(self, tx: float, ty: float) -> bool:
-        """Is target (tx, ty) within this agent's field of view?"""
-        dx, dy = tx - self.x, ty - self.y
-        angle_to = math.atan2(dy, dx)
-        diff = (angle_to - self.angle + math.pi) % math.tau - math.pi
-        return abs(diff) <= math.radians(FOV_DEGREES / 2)
-
-    def _circle_sweep(self, all_agents: List['Agent'], sim_time: float):
-        """
-        Look in all directions. Record any exits or hazards in memory.
-        In this step we just track other agents seen during the sweep
-        (exits/hazards would be added by the simulation manager later).
-        """
-        # Find any agents at panic-sweep range in all directions
-        for other in all_agents:
-            if other.id == self.id:
-                continue
-            dist = math.hypot(self.x - other.x, self.y - other.y)
-            if dist < PANIC_FOV_RANGE:
-                # Store position as "crowd" memory
-                self._add_memory("crowd", (other.x, other.y), sim_time)
-
-    def _add_memory(self, kind: str, pos: Tuple[float, float], t: float):
-        """Add or refresh memory entry (deduplicates within 20px)."""
-        for m in self.memory_entries:
-            if m.kind == kind and math.hypot(m.position[0] - pos[0],
-                                              m.position[1] - pos[1]) < 20:
-                m.time_seen = t
-                m.confidence = 1.0
-                return
-        self.memory_entries.append(MemoryEntry(kind, pos, t))
-        self.memory[kind] = pos
-
-    def add_exit_memory(self, pos: Tuple[float, float], t: float):
-        self._add_memory("exit", pos, t)
-
-    def add_hazard_memory(self, pos: Tuple[float, float], t: float):
-        self._add_memory("hazard", pos, t)
-
-
-# ══════════════════════════════════════════════════════════════════════
-#  Simulation Manager
-# ══════════════════════════════════════════════════════════════════════
 
 class Simulation:
     def __init__(self, walk_map: WalkMap, zone_config: dict):
         self.walk_map = walk_map
         self.agents: List[Agent] = []
         self.sim_time = 0.0
+        self.exits: Dict[int, Tuple[float, float]] = {}
+        self.hazards: Dict[int, Tuple[float, float]] = {}
         nm_path = Path("navmesh.json")
         self.navmesh = NavMesh(
             walk_map,
@@ -340,7 +497,6 @@ class Simulation:
             d = zone.get("density_index", 1.0)
             if d <= 0:
                 continue
-
             count = zone.get("agents", 0)
             if count <= 0:
                 continue
@@ -355,18 +511,23 @@ class Simulation:
 
             for _ in range(count):
                 px, py = random.choice(pool)
-                self.agents.append(Agent(float(px), float(py), self.walk_map))
+                self.agents.append(
+                    Agent(float(px), float(py), self.walk_map,
+                          exits=self.exits, hazards=self.hazards)
+                )
 
-            print(f"Spawned {len(self.agents)} agents")
+        print(f"Spawned {len(self.agents)} agents")
 
     def _scatter_random(self, n: int):
         ys, xs = np.where(self.walk_map.walkable)
         for _ in range(n):
             idx = random.randint(0, len(xs) - 1)
-            self.agents.append(Agent(float(xs[idx]), float(ys[idx]), self.walk_map))
+            self.agents.append(
+                Agent(float(xs[idx]), float(ys[idx]), self.walk_map,
+                      exits=self.exits, hazards=self.hazards)
+            )
 
     def _rebuild_labels(self, mask_path: str):
-        """Rebuild zone label map using same watershed as zone_editor."""
         import cv2
         from scipy import ndimage as ndi
         from skimage.segmentation import watershed
@@ -377,7 +538,6 @@ class Simulation:
         _, binary = cv2.threshold(walkable, 127, 255, cv2.THRESH_BINARY)
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
-
         dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
         dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
         coords = peak_local_max(dist_norm, min_distance=40, labels=binary)
@@ -387,6 +547,17 @@ class Simulation:
         labels = watershed(-dist, markers, mask=binary)
         return labels
 
+    def trigger_hazard(self, hazard_id: int, hazard_pos: Tuple[float, float], propagation_speed: float = 50.0):
+        self.hazards[hazard_id] = hazard_pos
+        for agent in self.agents:
+            dist = math.hypot(agent.x - hazard_pos[0], agent.y - hazard_pos[1])
+            if agent.check_immediate_awareness(hazard_pos):
+                agent.panic_delay_remaining = 0.0
+                agent.state = AgentState.EVACUATING
+                agent.panic = max(agent.panic, PANIC_SWEEP_THR)
+                continue
+            agent.panic_delay_remaining = dist / propagation_speed
+
     def step(self):
         self.sim_time += DT
         for agent in self.agents:
@@ -395,12 +566,9 @@ class Simulation:
     def reset(self, zone_config: dict):
         self.agents.clear()
         self.sim_time = 0.0
+        self.hazards.clear()
         self._spawn_agents(zone_config)
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  Render widget
-# ══════════════════════════════════════════════════════════════════════
 
 class SimView(QWidget):
     def __init__(self):
@@ -408,9 +576,9 @@ class SimView(QWidget):
         self.sim: Optional[Simulation] = None
         self.bg_pixmap: Optional[QPixmap] = None
         self.selected_agent: Optional[Agent] = None
-        self.show_fov       = True
-        self.show_memory    = True
-        self.show_explored  = False
+        self.show_fov = True
+        self.show_memory = True
+        self.show_explored = False
         self.show_navmesh = False
         self.setMinimumSize(400, 400)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -418,7 +586,6 @@ class SimView(QWidget):
 
     def set_sim(self, sim: Simulation, mask_path: str):
         self.sim = sim
-        # Build background from mask
         img = cv2.imread(mask_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         h, w, c = img.shape
@@ -427,22 +594,19 @@ class SimView(QWidget):
         self.update()
 
     def _layout(self):
-        """Uniform scale + letterbox offsets so image keeps its aspect ratio."""
         if self.bg_pixmap is None:
             return 1.0, 0.0, 0.0
         iw, ih = self.bg_pixmap.width(), self.bg_pixmap.height()
         s = min(self.width() / iw, self.height() / ih)
-        ox = (self.width()  - iw * s) / 2
+        ox = (self.width() - iw * s) / 2
         oy = (self.height() - ih * s) / 2
         return s, ox, oy
 
     def _w2s(self, wx, wy):
-        """World → screen coords."""
         s, ox, oy = self._layout()
         return wx * s + ox, wy * s + oy
 
     def _s2w(self, sx, sy):
-        """Screen → world coords."""
         s, ox, oy = self._layout()
         return (sx - ox) / s, (sy - oy) / s
 
@@ -450,6 +614,12 @@ class SimView(QWidget):
         if self.sim is None:
             return
         wx, wy = self._s2w(event.position().x(), event.position().y())
+
+        win = self.window()
+        if hasattr(win, "handle_map_click") and win.handle_map_click(wx, wy):
+            self.update()
+            return
+
         s, _, _ = self._layout()
         pick_r = 20 / s
         best, best_d = None, pick_r
@@ -471,17 +641,14 @@ class SimView(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         s, ox, oy = self._layout()
 
-        # Background — letterboxed
         if self.bg_pixmap:
             from PyQt6.QtCore import QRectF
             iw, ih = self.bg_pixmap.width(), self.bg_pixmap.height()
             p.drawPixmap(QRectF(ox, oy, iw * s, ih * s).toRect(), self.bg_pixmap)
 
-        if self.show_navmesh and self.sim and hasattr(self.sim, 'navmesh'):
-            s, ox, oy = self._layout()
+        if self.show_navmesh and hasattr(self.sim, 'navmesh'):
             self.sim.navmesh.draw_debug(p, s, ox, oy)
-            
-        # Explored overlay
+
         if self.show_explored and self.selected_agent:
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QBrush(QColor(100, 200, 255, 40)))
@@ -489,34 +656,47 @@ class SimView(QWidget):
                 scx, scy = self._w2s(cx * 10, cy * 10)
                 p.drawRect(int(scx), int(scy), int(10 * s), int(10 * s))
 
+        for _, (x, y) in self.sim.exits.items():
+            ex, ey = self._w2s(x, y)
+            p.setPen(QPen(QColor(0, 255, 120), 2))
+            p.setBrush(QBrush(QColor(0, 255, 120, 120)))
+            p.drawEllipse(QPointF(ex, ey), 8, 8)
+
+        for _, (x, y) in self.sim.hazards.items():
+            hx, hy = self._w2s(x, y)
+            p.setPen(QPen(QColor(255, 80, 40), 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawLine(QPointF(hx - 8, hy - 8), QPointF(hx + 8, hy + 8))
+            p.drawLine(QPointF(hx - 8, hy + 8), QPointF(hx + 8, hy - 8))
+
         for a in self.sim.agents:
             ax, ay = self._w2s(a.x, a.y)
             r = max(3, AGENT_RADIUS * s)
 
-            # FOV cone
             if self.show_fov and (a.selected or len(self.sim.agents) <= 80):
                 fov_range_scaled = FOV_RANGE * s
-                fov_half = math.radians(FOV_DEGREES / 2)
+                fov_half = math.radians(a.current_fov_deg / 2)
                 path = QPainterPath()
                 path.moveTo(ax, ay)
                 steps = 12
                 for i in range(steps + 1):
                     t = -fov_half + i * (2 * fov_half / steps)
                     angle = a.angle + t
-                    path.lineTo(ax + math.cos(angle) * fov_range_scaled,
-                                ay + math.sin(angle) * fov_range_scaled)
+                    path.lineTo(
+                        ax + math.cos(angle) * fov_range_scaled,
+                        ay + math.sin(angle) * fov_range_scaled
+                    )
                 path.closeSubpath()
                 p.setPen(Qt.PenStyle.NoPen)
                 alpha = 60 if a.selected else 18
                 p.setBrush(QBrush(QColor(255, 255, 180, alpha)))
                 p.drawPath(path)
 
-            # Memory dots (selected agent only)
             if self.show_memory and a.selected:
                 for m in a.memory_entries:
                     mx2, my2 = self._w2s(m.position[0], m.position[1])
                     age = (self.sim.sim_time - m.time_seen) / MEMORY_DECAY
-                    alpha = int(180 * (1 - age))
+                    alpha = int(180 * max(0.0, 1 - age))
                     if m.kind == "exit":
                         color = QColor(0, 255, 100, alpha)
                     elif m.kind == "hazard":
@@ -527,18 +707,16 @@ class SimView(QWidget):
                     p.setBrush(QBrush(color))
                     p.drawEllipse(QPointF(mx2, my2), 4, 4)
 
-            # Agent body
             if a.selected:
                 p.setPen(QPen(QColor(255, 255, 0), 2))
                 p.setBrush(QBrush(QColor(255, 220, 0, 220)))
             else:
-                red  = int(200 * a.panic + 60 * (1 - a.panic))
+                red = int(200 * a.panic + 60 * (1 - a.panic))
                 blue = int(180 * (1 - a.panic))
                 p.setPen(QPen(QColor(0, 0, 0, 120), 1))
                 p.setBrush(QBrush(QColor(red, 100, blue, 200)))
             p.drawEllipse(QPointF(ax, ay), r, r)
 
-            # Direction arrow
             arrow_len = r * 1.8
             ex = ax + math.cos(a.angle) * arrow_len
             ey = ay + math.sin(a.angle) * arrow_len
@@ -547,10 +725,6 @@ class SimView(QWidget):
 
         p.end()
 
-
-# ══════════════════════════════════════════════════════════════════════
-#  Inspector panel (shows selected agent's memory)
-# ══════════════════════════════════════════════════════════════════════
 
 class InspectorPanel(QFrame):
     def __init__(self):
@@ -565,25 +739,27 @@ class InspectorPanel(QFrame):
         title.setStyleSheet("font-size:13pt; font-weight:bold; color:#e94560;")
         lv.addWidget(title)
 
-        self.id_label    = QLabel("Click an agent to inspect")
-        self.pos_label   = QLabel("")
+        self.id_label = QLabel("Click an agent to inspect")
+        self.pos_label = QLabel("")
         self.speed_label = QLabel("")
         self.panic_label = QLabel("")
         self.cells_label = QLabel("")
-        for lbl in [self.id_label, self.pos_label, self.speed_label,
-                    self.panic_label, self.cells_label]:
+        for lbl in [self.id_label, self.pos_label, self.speed_label, self.panic_label, self.cells_label]:
             lbl.setStyleSheet("color:#ccc; font-size:9pt;")
             lv.addWidget(lbl)
 
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#333;")
         lv.addWidget(sep)
 
-        lv.addWidget(QLabel("Memory:").setVisible(False) or QLabel("Memory:"))
+        mem_title = QLabel("Memory:")
+        lv.addWidget(mem_title)
+
         self.memory_scroll = QScrollArea()
         self.memory_scroll.setWidgetResizable(True)
         self.memory_content = QWidget()
-        self.memory_layout  = QVBoxLayout(self.memory_content)
+        self.memory_layout = QVBoxLayout(self.memory_content)
         self.memory_layout.setSpacing(2)
         self.memory_layout.setContentsMargins(0, 0, 0, 0)
         self.memory_scroll.setWidget(self.memory_content)
@@ -604,7 +780,7 @@ class InspectorPanel(QFrame):
         self.id_label.setText(f"Agent #{agent.id}")
         self.pos_label.setText(f"Position:  ({agent.x:.0f}, {agent.y:.0f})")
         self.speed_label.setText(f"Speed:      {agent.speed:.1f} px/s")
-        self.panic_label.setText(f"Panic:      {agent.panic:.2f}")
+        self.panic_label.setText(f"Panic:      {agent.panic:.2f} ({agent.panic_state_name})")
         self.cells_label.setText(f"Explored:   {len(agent.known_map_cells)} cells")
 
         self._clear_memory()
@@ -614,11 +790,13 @@ class InspectorPanel(QFrame):
             self.memory_layout.addWidget(lbl)
         for m in sorted(agent.memory_entries, key=lambda x: -x.time_seen):
             age = sim_time - m.time_seen
-            text = (f"  [{m.kind:6s}]  ({m.position[0]:.0f},{m.position[1]:.0f})"
-                    f"  {age:.1f}s ago")
-            if m.kind == "exit":    color = "#00ff66"
-            elif m.kind == "hazard": color = "#ff6040"
-            else:                    color = "#aaaaff"
+            text = f"  [{m.kind:6s}]  ({m.position[0]:.0f},{m.position[1]:.0f})  {age:.1f}s ago"
+            if m.kind == "exit":
+                color = "#00ff66"
+            elif m.kind == "hazard":
+                color = "#ff6040"
+            else:
+                color = "#aaaaff"
             lbl = QLabel(text)
             lbl.setStyleSheet(f"color:{color}; font-size:8pt; font-family:monospace;")
             self.memory_layout.addWidget(lbl)
@@ -631,12 +809,7 @@ class InspectorPanel(QFrame):
                 item.widget().deleteLater()
 
 
-# ══════════════════════════════════════════════════════════════════════
-#  Main Window
-# ══════════════════════════════════════════════════════════════════════
-
 class MainWindow(QMainWindow):
-
     STYLE = """
     QMainWindow, QWidget { background:#1a1a2e; color:#e0e0e0;
         font-family:'Segoe UI',Arial,sans-serif; font-size:10pt; }
@@ -663,6 +836,11 @@ class MainWindow(QMainWindow):
         self.zone_config: dict = {}
         self.mask_path: str = ""
         self.paused = True
+        self.add_exit_mode = False
+        self.add_hazard_mode = False
+        self.next_exit_id = 1
+        self.next_hazard_id = 1
+        self._stats_skip = 0
 
         self.timer = QTimer()
         self.timer.setInterval(int(DT * 1000))
@@ -677,14 +855,13 @@ class MainWindow(QMainWindow):
         rl.setSpacing(12)
         self.setCentralWidget(root)
 
-        # ── Left controls ──
-        left = QFrame(); left.setObjectName("card"); left.setFixedWidth(220)
+        left = QFrame()
+        left.setObjectName("card")
+        left.setFixedWidth(220)
         lv = QVBoxLayout(left)
         lv.setContentsMargins(10, 10, 10, 10)
         lv.setSpacing(8)
 
-        QLabel("<b style='font-size:13pt;color:#e94560'>TRAGIC</b><br>"
-               "<span style='font-size:9pt;color:#888'>Step 3 — Agent Sim</span>").setParent(left)
         title = QLabel("<b style='font-size:13pt;color:#e94560'>TRAGIC</b><br>"
                        "<span style='font-size:9pt;color:#888'>Step 3 — Agent Sim</span>")
         title.setTextFormat(Qt.TextFormat.RichText)
@@ -704,6 +881,18 @@ class MainWindow(QMainWindow):
         self.reset_btn.setEnabled(False)
         self.reset_btn.clicked.connect(self.reset_sim)
         lv.addWidget(self.reset_btn)
+
+        self.add_exit_btn = QPushButton("➕ Add Exit")
+        self.add_exit_btn.setCheckable(True)
+        self.add_exit_btn.setEnabled(False)
+        self.add_exit_btn.clicked.connect(self._toggle_add_exit_mode)
+        lv.addWidget(self.add_exit_btn)
+
+        self.start_hazard_btn = QPushButton("🔥 Start Hazard")
+        self.start_hazard_btn.setCheckable(True)
+        self.start_hazard_btn.setEnabled(False)
+        self.start_hazard_btn.clicked.connect(self._toggle_hazard_mode)
+        lv.addWidget(self.start_hazard_btn)
 
         lv.addWidget(self._sep())
         lv.addWidget(QLabel("Simulation Speed:"))
@@ -743,10 +932,7 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.stat_label)
         lv.addStretch()
 
-        # ── Sim view ──
         self.sim_view = SimView()
-
-        # ── Inspector ──
         self.inspector = InspectorPanel()
 
         rl.addWidget(left)
@@ -754,13 +940,49 @@ class MainWindow(QMainWindow):
         rl.addWidget(self.inspector)
 
     def _sep(self):
-        sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet("color:#0f3460;")
         return sep
 
+    def _toggle_add_exit_mode(self):
+        self.add_exit_mode = self.add_exit_btn.isChecked()
+        if self.add_exit_mode:
+            self.add_hazard_mode = False
+            self.start_hazard_btn.setChecked(False)
+
+    def _toggle_hazard_mode(self):
+        self.add_hazard_mode = self.start_hazard_btn.isChecked()
+        if self.add_hazard_mode:
+            self.add_exit_mode = False
+            self.add_exit_btn.setChecked(False)
+
+    def handle_map_click(self, x: float, y: float) -> bool:
+        if self.sim is None:
+            return False
+        if not self.sim.walk_map.is_walkable(x, y):
+            return True
+
+        if self.add_exit_mode:
+            self.sim.exits[self.next_exit_id] = (x, y)
+            self.next_exit_id += 1
+            self.add_exit_mode = False
+            self.add_exit_btn.setChecked(False)
+            self.sim_view.update()
+            return True
+
+        if self.add_hazard_mode:
+            self.sim.trigger_hazard(self.next_hazard_id, (x, y))
+            self.next_hazard_id += 1
+            self.add_hazard_mode = False
+            self.start_hazard_btn.setChecked(False)
+            self.sim_view.update()
+            return True
+
+        return False
+
     def load_config(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Zone Config JSON", "", "JSON (*.json)")
+        path, _ = QFileDialog.getOpenFileName(self, "Select Zone Config JSON", "", "JSON (*.json)")
         if not path:
             return
 
@@ -769,9 +991,7 @@ class MainWindow(QMainWindow):
 
         mask_path = self.zone_config.get("mask_path", "")
         if not Path(mask_path).exists():
-            # Let user pick mask manually
-            mask_path, _ = QFileDialog.getOpenFileName(
-                self, "Locate Mask Image", "", "Images (*.png *.jpg *.bmp)")
+            mask_path, _ = QFileDialog.getOpenFileName(self, "Locate Mask Image", "", "Images (*.png *.jpg *.bmp)")
             if not mask_path:
                 return
             self.zone_config["mask_path"] = mask_path
@@ -787,6 +1007,8 @@ class MainWindow(QMainWindow):
         self.sim_view.set_sim(self.sim, mask_path)
         self.run_btn.setEnabled(True)
         self.reset_btn.setEnabled(True)
+        self.add_exit_btn.setEnabled(True)
+        self.start_hazard_btn.setEnabled(True)
         self._update_stats()
         self.paused = True
         self.run_btn.setText("▶ Start")
@@ -820,8 +1042,12 @@ class MainWindow(QMainWindow):
         for _ in range(steps):
             self.sim.step()
         self.sim_view.update()
-        self._update_stats()
-        # Refresh inspector if agent selected
+
+        self._stats_skip += 1
+        if self._stats_skip >= 5:
+            self._update_stats()
+            self._stats_skip = 0
+
         if self.sim_view.selected_agent:
             self.inspector.update_agent(self.sim_view.selected_agent, self.sim.sim_time)
 
@@ -837,9 +1063,12 @@ class MainWindow(QMainWindow):
         self.stat_label.setText(
             f"Time:     {t:.1f} s\n"
             f"Agents:   {n}\n"
+            f"Exits:    {len(self.sim.exits)}\n"
+            f"Hazards:  {len(self.sim.hazards)}\n"
             f"Explored: {explored} cells total\n\n"
-            f"Click agent to inspect.\nSpace = pause.")
-        # Update inspector if no agent selected
+            f"Click agent to inspect.\n"
+            f"Use Add Exit / Start Hazard to place markers."
+        )
         if not self.sim_view.selected_agent:
             self.inspector.update_agent(None, t)
 
@@ -850,20 +1079,8 @@ class MainWindow(QMainWindow):
             self.reset_sim()
 
 
-# ══════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())
-
-
-
-
-
-
-
-
-
-
-
