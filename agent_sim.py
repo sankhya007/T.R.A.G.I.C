@@ -16,11 +16,13 @@ import sys
 import json
 import math
 import random
+import heapq
 import numpy as np
 import cv2
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict
+
 from navmesh import NavMesh
 
 from PyQt6.QtWidgets import (
@@ -28,7 +30,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QFileDialog, QFrame, QSizePolicy, QScrollArea,
     QMessageBox, QCheckBox, QSlider
 )
-from PyQt6.QtCore import Qt, QTimer, QPointF
+from PyQt6.QtCore import Qt, QTimer, QPointF, QRectF
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush,
     QImage, QPixmap, QPainterPath
@@ -36,40 +38,56 @@ from PyQt6.QtGui import (
 
 from agents import Agent as CoreAgent, AgentState, AgentProfile
 
+
 # ── Simulation constants ───────────────────────────────────────────────
-DT = 0.05
-AGENT_RADIUS = 6
-FOV_DEGREES = 120
-FOV_RANGE = 80
+DT              = 0.05
+AGENT_RADIUS    = 6
+FOV_DEGREES     = 120
+FOV_RANGE       = 80
 PANIC_FOV_RANGE = 140
-SPEED_BASE = 35
-SPEED_VARIANCE = 0.25
+SPEED_BASE      = 35
+SPEED_VARIANCE  = 0.25
 NEIGHBOR_RADIUS = 40
-WALL_BUFFER = AGENT_RADIUS + 2
+WALL_BUFFER     = AGENT_RADIUS + 2
 CIRCLE_SWEEP_INTERVAL = 3.0
-MEMORY_DECAY = 120.0
-RAY_COUNT = 12
+MEMORY_DECAY    = 120.0
+
+# Perception / memory
+RAY_COUNT       = 12
 PANIC_SWEEP_THR = 0.35
 MEM_DEGRADE_THR = 0.70
-MEM_DEGRADE_P = 0.30
-MAX_KNOWN_CELLS = 400
+MEM_DEGRADE_P   = 0.30
+
+# Panic model
+PANIC_RADIUS          = 140.0
+AWARE_HERD_WEIGHT     = 0.30
+DISTRESS_HERD_WEIGHT  = 0.60
+PANIC_HERD_WEIGHT     = 1.00
+DISTRESS_FOV_DEG      = 90.0
+PANIC_FOV_MIN_DEG     = 60.0
+DISTRESS_RADIUS_SCALE = 0.85
+PANIC_RADIUS_SCALE    = 0.70
+CALM_SPEED_SCALE      = 0.95
+AWARE_SPEED_SCALE     = 1.05
+DISTRESS_SPEED_SCALE  = 1.18
+PANIC_SPEED_SCALE     = 1.30
+
+# Hierarchical navigation
+WAYPOINT_REACHED_DIST    = 14.0
+WAYPOINT_BLOCKED_DENSITY = 6
+GRAPH_LINK_RADIUS        = 220.0
+LOCAL_TARGET_WEIGHT      = 1.25
+WANDER_WEIGHT            = 0.15
+REPLAN_COOLDOWN          = 0.35
+STUCK_REPLAN_TICKS       = 20
+
+MAX_KNOWN_CELLS    = 400
 MAX_MEMORY_ENTRIES = 16
 
-# ── Panic model constants ──────────────────────────────────────────────
-PANIC_RADIUS = 140.0
-AWARE_HERD_WEIGHT = 0.30
-DISTRESS_HERD_WEIGHT = 0.60
-PANIC_HERD_WEIGHT = 1.00
-DISTRESS_FOV_DEG = 90.0
-PANIC_FOV_MIN_DEG = 60.0
-DISTRESS_RADIUS_SCALE = 0.85
-PANIC_RADIUS_SCALE = 0.70
-CALM_SPEED_SCALE = 0.95
-AWARE_SPEED_SCALE = 1.05
-DISTRESS_SPEED_SCALE = 1.18
-PANIC_SPEED_SCALE = 1.30
-# ──────────────────────────────────────────────────────────────────────
 
+# ══════════════════════════════════════════════════════════════════════
+#  Walkability map
+# ══════════════════════════════════════════════════════════════════════
 
 class WalkMap:
     """Thin wrapper around a binary walkability image."""
@@ -77,8 +95,11 @@ class WalkMap:
         img = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise FileNotFoundError(mask_path)
+
+        # White = wall, black = walkable
         self.walkable = img < 128
         self.h, self.w = img.shape
+
         walk_uint8 = self.walkable.astype(np.uint8) * 255
         self.dist = cv2.distanceTransform(walk_uint8, cv2.DIST_L2, 5)
 
@@ -94,11 +115,18 @@ class WalkMap:
         d = self.dist[iy, ix]
         if d >= WALL_BUFFER * 2:
             return 0.0, 0.0
-        gx = (self.dist[iy, min(ix + 1, self.w - 1)] - self.dist[iy, max(ix - 1, 0)]) / 2
-        gy = (self.dist[min(iy + 1, self.h - 1), ix] - self.dist[max(iy - 1, 0), ix]) / 2
+
+        gx = (self.dist[iy, min(ix + 1, self.w - 1)] -
+              self.dist[iy, max(ix - 1, 0)]) / 2
+        gy = (self.dist[min(iy + 1, self.h - 1), ix] -
+              self.dist[max(iy - 1, 0), ix]) / 2
         strength = max(0, (WALL_BUFFER * 2 - d)) / (WALL_BUFFER * 2)
         return gx * strength * 150, gy * strength * 150
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  Data helpers
+# ══════════════════════════════════════════════════════════════════════
 
 @dataclass
 class MemoryEntry:
@@ -108,6 +136,17 @@ class MemoryEntry:
     confidence: float = 1.0
 
 
+@dataclass
+class NavNode:
+    node_id: int
+    kind: str
+    pos: Tuple[float, float]
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Agent_IM
+# ══════════════════════════════════════════════════════════════════════
+
 class Agent(CoreAgent):
     _id_counter = 0
 
@@ -116,6 +155,7 @@ class Agent(CoreAgent):
                  hazards: Optional[Dict[int, Tuple[float, float]]] = None):
         Agent._id_counter += 1
         profile = random.choice(list(AgentProfile))
+
         super().__init__(
             id=Agent._id_counter,
             pos=np.array([x, y], dtype=float),
@@ -129,6 +169,7 @@ class Agent(CoreAgent):
             speed_max=SPEED_BASE * random.uniform(1 - SPEED_VARIANCE, 1 + SPEED_VARIANCE),
             shoulder_radius=AGENT_RADIUS / 20.0,
         )
+
         self.x, self.y = x, y
         self.speed = self.speed_max
         self.angle = self.facing
@@ -136,12 +177,14 @@ class Agent(CoreAgent):
         self.vy = math.sin(self.angle) * self.speed
         self.walk_map = walk_map
 
+        # Shared world registers
         self._exits = exits if exits is not None else {}
         self._hazards = hazards if hazards is not None else {}
 
         self.memory_entries: List[MemoryEntry] = []
         self.known_map_cells: set = set()
 
+        # Sweep state
         self._sweep_active = False
         self._sweep_tick = 0
         self._sweep_total_ticks = math.ceil(360 / FOV_DEGREES)
@@ -152,11 +195,11 @@ class Agent(CoreAgent):
         self.last_sweep_time = random.uniform(0, CIRCLE_SWEEP_INTERVAL)
         self.sim_time = 0.0
         self._target_angle = self.angle
-        self._wander_timer = random.uniform(0, 2.0)
+        self._wander_timer = random.uniform(0.0, 2.0)
         self.selected = False
         self.fov_visible_ids: set = set()
 
-        # PAC model parameters
+        # Panic model
         self.alpha = {
             AgentProfile.ADULT: 0.045,
             AgentProfile.CHILD: 0.060,
@@ -178,29 +221,53 @@ class Agent(CoreAgent):
         self.pathfinding_quality = 1.0
         self.panic_state_name = "CALM"
 
-    def _in_fov(self, tx: float, ty: float, angle_override: float = None) -> bool:
+        # Hierarchical navigation state
+        self.current_exit_id: Optional[int] = None
+        self.current_path_nodes: List[int] = []
+        self.current_path_points: List[Tuple[float, float]] = []
+        self.path_index = 0
+        self.last_planned_exit_count = 0
+        self.last_replan_time = -999.0
+        self.follow_crowd_only = False
+        self.stuck_ticks = 0
+        self._last_pos_for_stuck = (self.x, self.y)
+
+    # ── Geometry ────────────────────────────────────────────────────
+
+    def _in_fov(self, tx: float, ty: float, angle_override: Optional[float] = None) -> bool:
         dx, dy = tx - self.x, ty - self.y
         base = self.angle if angle_override is None else angle_override
         angle_to = math.atan2(dy, dx)
         diff = (angle_to - base + math.pi) % math.tau - math.pi
         return abs(diff) <= math.radians(self.current_fov_deg / 2)
 
-    def _ray_clear(self, tx: float, ty: float) -> bool:
+    def _ray_clear(self, tx: float, ty: float, max_range: Optional[float] = None) -> bool:
         dx, dy = tx - self.x, ty - self.y
         dist = math.hypot(dx, dy)
-        if dist < 1e-4:
+        if dist < 1e-6:
             return True
-        steps = int(min(dist, FOV_RANGE))
+        if max_range is not None and dist > max_range:
+            return False
+
+        steps = int(min(dist, max_range if max_range is not None else FOV_RANGE))
+        if steps <= 0:
+            return True
+
         sx, sy = dx / dist, dy / dist
         for i in range(1, steps + 1):
-            if not self.walk_map.is_walkable(self.x + sx * i, self.y + sy * i):
+            px = self.x + sx * i
+            py = self.y + sy * i
+            if not self.walk_map.is_walkable(px, py):
                 return False
         return True
 
-    def _point_visible(self, tx: float, ty: float) -> bool:
-        return self._in_fov(tx, ty) and self._ray_clear(tx, ty)
+    def _point_visible(self, tx: float, ty: float, max_range: float = FOV_RANGE) -> bool:
+        dist = math.hypot(tx - self.x, ty - self.y)
+        if dist > max_range:
+            return False
+        return self._in_fov(tx, ty) and self._ray_clear(tx, ty, max_range)
 
-    # ── Panic model ──────────────────────────────────────────────────
+    # ── Panic model ─────────────────────────────────────────────────
 
     def _nearest_hazard_distance(self) -> float:
         if not self._hazards:
@@ -219,7 +286,6 @@ class Agent(CoreAgent):
             self.panic + (self.alpha * hazard_signal) - (self.beta * open_air_dt),
             0.0, 1.0
         ))
-
         self._apply_panic_state()
 
     def _apply_panic_state(self):
@@ -235,7 +301,7 @@ class Agent(CoreAgent):
 
         elif self.panic <= 0.5:
             self.panic_state_name = "AWARE"
-            self.state = AgentState.AWARE
+            self.state = getattr(AgentState, "AWARE", AgentState.CALM)
             self.herd_weight = AWARE_HERD_WEIGHT
             self.goal_weight = 1.0 - self.herd_weight
             self.current_fov_deg = FOV_DEGREES
@@ -245,7 +311,7 @@ class Agent(CoreAgent):
 
         elif self.panic <= 0.75:
             self.panic_state_name = "DISTRESSED"
-            self.state = AgentState.PANICKING
+            self.state = getattr(AgentState, "PANICKING", AgentState.CALM)
             self.herd_weight = DISTRESS_HERD_WEIGHT
             self.goal_weight = 1.0 - self.herd_weight
             self.current_fov_deg = DISTRESS_FOV_DEG
@@ -255,7 +321,7 @@ class Agent(CoreAgent):
 
         else:
             self.panic_state_name = "PANIC"
-            self.state = AgentState.PANICKING
+            self.state = getattr(AgentState, "PANICKING", AgentState.CALM)
             self.herd_weight = PANIC_HERD_WEIGHT
             self.goal_weight = 0.0
             self.current_fov_deg = PANIC_FOV_MIN_DEG
@@ -263,86 +329,43 @@ class Agent(CoreAgent):
             self.pathfinding_quality = 0.25
             self.speed = self.speed_max * PANIC_SPEED_SCALE
 
-    # ── Perception ───────────────────────────────────────────────────
-
-    def update_perception(self, sim_time: float):
-        for eid, epos in self._exits.items():
-            if math.hypot(epos[0] - self.x, epos[1] - self.y) <= FOV_RANGE and self._point_visible(*epos):
-                self._store_memory(eid, "exit", epos, sim_time)
-
-        for hid, hpos in self._hazards.items():
-            if math.hypot(hpos[0] - self.x, hpos[1] - self.y) <= FOV_RANGE and self._point_visible(*hpos):
-                self._store_memory(hid, "hazard", hpos, sim_time)
-
-    # ── Sweep logic ──────────────────────────────────────────────────
-
-    def check_sweeps(self, sim_time: float):
-        if (not self._sweep_triggered and self.panic >= PANIC_SWEEP_THR and self.panic_delay_remaining <= 0.0):
-            self._sweep_active = True
-            self._sweep_tick = 0
-            self._sweep_triggered = True
-            self._sweep_angle_offset = self.angle
-
-        if (not self._sweep_active and sim_time - self.last_sweep_time >= CIRCLE_SWEEP_INTERVAL):
-            self._sweep_active = True
-            self._sweep_tick = 0
-            self._sweep_angle_offset = self.angle
-            self.last_sweep_time = sim_time
-
-        if self._sweep_active:
-            self._do_sweep_tick(sim_time)
-
-    def _do_sweep_tick(self, sim_time: float):
-        tick_deg = 360.0 / self._sweep_total_ticks
-        scan_base = self._sweep_angle_offset + math.radians(tick_deg * self._sweep_tick)
-
-        for eid, epos in self._exits.items():
-            dist = math.hypot(epos[0] - self.x, epos[1] - self.y)
-            if dist <= PANIC_FOV_RANGE and self._in_fov(*epos, angle_override=scan_base) and self._ray_clear(*epos):
-                self._store_memory(eid, "exit", epos, sim_time)
-
-        for hid, hpos in self._hazards.items():
-            dist = math.hypot(hpos[0] - self.x, hpos[1] - self.y)
-            if dist <= PANIC_FOV_RANGE and self._in_fov(*hpos, angle_override=scan_base) and self._ray_clear(*hpos):
-                self._store_memory(hid, "hazard", hpos, sim_time)
-
-        self._sweep_tick += 1
-        if self._sweep_tick >= self._sweep_total_ticks:
-            self._sweep_active = False
-            self._sweep_tick = 0
-
-    def check_immediate_awareness(self, hazard_pos: Tuple[float, float]) -> bool:
-        if self._in_fov(*hazard_pos) and self._ray_clear(*hazard_pos):
-            self._sweep_triggered = True
-            return True
-        return False
-
-    # ── Memory ───────────────────────────────────────────────────────
+    # ── Memory ──────────────────────────────────────────────────────
 
     def _store_memory(self, uid: int, kind: str, pos: Tuple[float, float], t: float):
         self.memory[uid] = {"kind": kind, "pos": pos, "t": t, "certain": True}
+
         for m in self.memory_entries:
             if m.kind == kind and math.hypot(m.position[0] - pos[0], m.position[1] - pos[1]) < 20:
                 m.time_seen = t
                 m.confidence = 1.0
                 return
+
         self.memory_entries.append(MemoryEntry(kind, pos, t))
         if len(self.memory_entries) > MAX_MEMORY_ENTRIES:
             self.memory_entries.sort(key=lambda m: m.time_seen, reverse=True)
             self.memory_entries = self.memory_entries[:MAX_MEMORY_ENTRIES]
 
+    def add_exit_memory(self, pos: Tuple[float, float], t: float, uid: int = -1):
+        self._store_memory(uid if uid != -1 else hash(pos), "exit", pos, t)
+
+    def add_hazard_memory(self, pos: Tuple[float, float], t: float, uid: int = -1):
+        self._store_memory(uid if uid != -1 else hash(pos), "hazard", pos, t)
+
     def manage_memory(self, all_agents: List['Agent'], sim_time: float):
         self.memory_entries = [m for m in self.memory_entries if sim_time - m.time_seen < MEMORY_DECAY]
-        stale = [uid for uid, v in self.memory.items() if sim_time - v["t"] >= MEMORY_DECAY]
-        for k in stale:
-            del self.memory[k]
 
-        if self.panic > MEM_DEGRADE_THR and self.goal is not None:
+        stale = [uid for uid, v in self.memory.items() if sim_time - v["t"] >= MEMORY_DECAY]
+        for uid in stale:
+            del self.memory[uid]
+
+        if self.panic > MEM_DEGRADE_THR:
             if random.random() < self.panic * MEM_DEGRADE_P:
                 for v in self.memory.values():
-                    if v["kind"] == "exit" and v["pos"] == self.goal:
+                    if v["kind"] == "exit":
                         v["certain"] = False
                 self._do_herding(all_agents)
+
+    # ── Herding ─────────────────────────────────────────────────────
 
     def _do_herding(self, all_agents: List['Agent']):
         best_d, best = float("inf"), None
@@ -368,26 +391,270 @@ class Agent(CoreAgent):
         if abs(bx) > 1e-6 or abs(by) > 1e-6:
             self._target_angle = math.atan2(by, bx)
 
-    def add_exit_memory(self, pos: Tuple[float, float], t: float, uid: int = -1):
-        self._store_memory(uid if uid != -1 else hash(pos), "exit", pos, t)
+    # ── Perception ──────────────────────────────────────────────────
 
-    def add_hazard_memory(self, pos: Tuple[float, float], t: float, uid: int = -1):
-        self._store_memory(uid if uid != -1 else hash(pos), "hazard", pos, t)
+    def update_perception(self, sim_time: float):
+        # Exits in normal FOV
+        for eid, epos in self._exits.items():
+            if self._point_visible(epos[0], epos[1], FOV_RANGE):
+                self._store_memory(eid, "exit", epos, sim_time)
 
-    def update(self, dt: float, all_agents: List['Agent'], sim_time: float):
+        # Hazards in normal FOV
+        for hid, hpos in self._hazards.items():
+            if self._point_visible(hpos[0], hpos[1], FOV_RANGE):
+                self._store_memory(hid, "hazard", hpos, sim_time)
+                self.panic = max(self.panic, PANIC_SWEEP_THR)
+                self._apply_panic_state()
+
+    def check_immediate_awareness(self, hazard_pos: Tuple[float, float]) -> bool:
+        if self._point_visible(hazard_pos[0], hazard_pos[1], FOV_RANGE):
+            self._store_memory(hash(("haz0", hazard_pos)), "hazard", hazard_pos, self.sim_time)
+            self.panic = max(self.panic, PANIC_SWEEP_THR)
+            self._apply_panic_state()
+            self._sweep_triggered = True
+            return True
+        return False
+
+    # ── Sweeps ──────────────────────────────────────────────────────
+
+    def check_sweeps(self, sim_time: float):
+        if (not self._sweep_triggered
+                and self.panic >= PANIC_SWEEP_THR
+                and self.panic_delay_remaining <= 0.0):
+            self._sweep_active = True
+            self._sweep_tick = 0
+            self._sweep_triggered = True
+            self._sweep_angle_offset = self.angle
+
+        if (not self._sweep_active
+                and sim_time - self.last_sweep_time >= CIRCLE_SWEEP_INTERVAL):
+            self._sweep_active = True
+            self._sweep_tick = 0
+            self._sweep_angle_offset = self.angle
+            self.last_sweep_time = sim_time
+
+        if self._sweep_active:
+            self._do_sweep_tick(sim_time)
+
+    def _do_sweep_tick(self, sim_time: float):
+        tick_deg = 360.0 / self._sweep_total_ticks
+        scan_base = self._sweep_angle_offset + math.radians(tick_deg * self._sweep_tick)
+
+        def visible_with_base(tx: float, ty: float, max_range: float) -> bool:
+            dx, dy = tx - self.x, ty - self.y
+            dist = math.hypot(dx, dy)
+            if dist > max_range:
+                return False
+            angle_to = math.atan2(dy, dx)
+            diff = (angle_to - scan_base + math.pi) % math.tau - math.pi
+            if abs(diff) > math.radians(self.current_fov_deg / 2):
+                return False
+            return self._ray_clear(tx, ty, max_range)
+
+        for eid, epos in self._exits.items():
+            if visible_with_base(epos[0], epos[1], PANIC_FOV_RANGE):
+                self._store_memory(eid, "exit", epos, sim_time)
+
+        for hid, hpos in self._hazards.items():
+            if visible_with_base(hpos[0], hpos[1], PANIC_FOV_RANGE):
+                self._store_memory(hid, "hazard", hpos, sim_time)
+                self.panic = max(self.panic, PANIC_SWEEP_THR)
+                self._apply_panic_state()
+
+        self._sweep_tick += 1
+        if self._sweep_tick >= self._sweep_total_ticks:
+            self._sweep_active = False
+            self._sweep_tick = 0
+
+    # ── Hierarchical planning ───────────────────────────────────────
+
+    def get_best_exit_from_memory(self) -> Optional[int]:
+        exit_candidates = []
+        for uid, item in self.memory.items():
+            if item.get("kind") == "exit":
+                pos = item["pos"]
+                d = math.hypot(pos[0] - self.x, pos[1] - self.y)
+                certainty_bonus = 0.0 if item.get("certain", True) else 25.0
+                exit_candidates.append((d + certainty_bonus, uid))
+
+        if not exit_candidates:
+            return None
+        exit_candidates.sort(key=lambda x: x[0])
+        return exit_candidates[0][1]
+
+    def is_waypoint_blocked(self, sim: 'Simulation', waypoint: Tuple[float, float]) -> bool:
+        if not self.walk_map.is_walkable(*waypoint):
+            return True
+
+        crowd_count = 0
+        for other in sim.agents:
+            if other.id == self.id:
+                continue
+            if math.hypot(other.x - waypoint[0], other.y - waypoint[1]) < NEIGHBOR_RADIUS:
+                crowd_count += 1
+                if crowd_count >= WAYPOINT_BLOCKED_DENSITY:
+                    return True
+
+        for _, hpos in sim.hazards.items():
+            if math.hypot(hpos[0] - waypoint[0], hpos[1] - waypoint[1]) < AGENT_RADIUS * 6:
+                return True
+
+        return False
+
+    def plan_high_level_path(self, sim: 'Simulation'):
+        if self.panic >= 0.75:
+            self.follow_crowd_only = True
+            self.current_exit_id = None
+            self.current_path_nodes = []
+            self.current_path_points = []
+            self.path_index = 0
+            self.last_replan_time = self.sim_time
+            return
+
+        target_exit_id = self.get_best_exit_from_memory()
+        if target_exit_id is None:
+            self.current_exit_id = None
+            self.current_path_nodes = []
+            self.current_path_points = []
+            self.path_index = 0
+            self.follow_crowd_only = False
+            self.last_planned_exit_count = 0
+            self.last_replan_time = self.sim_time
+            return
+
+        start_node = sim.find_nearest_graph_node((self.x, self.y))
+        goal_node = sim.exit_node_lookup.get(target_exit_id)
+
+        if start_node is None or goal_node is None:
+            self.current_exit_id = target_exit_id
+            self.current_path_nodes = []
+            self.current_path_points = [self._exits[target_exit_id]] if target_exit_id in self._exits else []
+            self.path_index = 0
+            self.follow_crowd_only = False
+            self.last_planned_exit_count = len([k for k, v in self.memory.items() if v.get("kind") == "exit"])
+            self.last_replan_time = self.sim_time
+            self.goal = self._exits.get(target_exit_id)
+            return
+
+        node_path = sim.astar_path(start_node, goal_node)
+        if not node_path:
+            self.current_exit_id = target_exit_id
+            self.current_path_nodes = []
+            self.current_path_points = [self._exits[target_exit_id]] if target_exit_id in self._exits else []
+            self.path_index = 0
+            self.follow_crowd_only = False
+            self.last_planned_exit_count = len([k for k, v in self.memory.items() if v.get("kind") == "exit"])
+            self.last_replan_time = self.sim_time
+            self.goal = self._exits.get(target_exit_id)
+            return
+
+        self.current_exit_id = target_exit_id
+        self.current_path_nodes = node_path
+        self.current_path_points = [sim.nav_nodes[nid].pos for nid in node_path]
+        self.path_index = 0
+        self.follow_crowd_only = False
+        self.last_planned_exit_count = len([k for k, v in self.memory.items() if v.get("kind") == "exit"])
+        self.last_replan_time = self.sim_time
+        self.goal = self._exits.get(target_exit_id)
+
+    def should_replan(self, sim: 'Simulation') -> bool:
+        if self.sim_time - self.last_replan_time < REPLAN_COOLDOWN:
+            return False
+
+        if self.panic >= 0.75:
+            return not self.follow_crowd_only
+
+        current_exit_count = len([k for k, v in self.memory.items() if v.get("kind") == "exit"])
+        if current_exit_count > self.last_planned_exit_count:
+            return True
+
+        if self.current_exit_id is None:
+            return current_exit_count > 0
+
+        if self.path_index < len(self.current_path_points):
+            wp = self.current_path_points[self.path_index]
+            if self.is_waypoint_blocked(sim, wp):
+                return True
+
+        if self.current_exit_id in self._exits:
+            if self.is_waypoint_blocked(sim, self._exits[self.current_exit_id]):
+                return True
+
+        moved = math.hypot(self.x - self._last_pos_for_stuck[0], self.y - self._last_pos_for_stuck[1])
+        if moved < 2.0:
+            self.stuck_ticks += 1
+        else:
+            self.stuck_ticks = 0
+            self._last_pos_for_stuck = (self.x, self.y)
+
+        if self.stuck_ticks > STUCK_REPLAN_TICKS:
+            self.stuck_ticks = 0
+            self._last_pos_for_stuck = (self.x, self.y)
+            return True
+
+        return False
+
+    def get_next_steering_target(self, sim: 'Simulation') -> Optional[Tuple[float, float]]:
+        if self.follow_crowd_only:
+            return None
+
+        while self.path_index < len(self.current_path_points):
+            wp = self.current_path_points[self.path_index]
+            if math.hypot(self.x - wp[0], self.y - wp[1]) <= WAYPOINT_REACHED_DIST:
+                self.path_index += 1
+            else:
+                return wp
+
+        if self.current_exit_id is not None and self.current_exit_id in self._exits:
+            return self._exits[self.current_exit_id]
+
+        return None
+
+    def update_navigation(self, sim: 'Simulation', all_agents: List['Agent']):
+        if self.should_replan(sim):
+            self.plan_high_level_path(sim)
+
+        if self.panic >= 0.75:
+            self.follow_crowd_only = True
+            self._do_herding(all_agents)
+            return
+
+        steering_target = self.get_next_steering_target(sim)
+        if steering_target is not None:
+            tx, ty = steering_target
+            goal_angle = math.atan2(ty - self.y, tx - self.x)
+
+            gx, gy = math.cos(goal_angle), math.sin(goal_angle)
+            wx, wy = math.cos(self._target_angle), math.sin(self._target_angle)
+
+            blend_x = LOCAL_TARGET_WEIGHT * gx + WANDER_WEIGHT * wx
+            blend_y = LOCAL_TARGET_WEIGHT * gy + WANDER_WEIGHT * wy
+            if abs(blend_x) > 1e-6 or abs(blend_y) > 1e-6:
+                self._target_angle = math.atan2(blend_y, blend_x)
+
+    # ── Main update ─────────────────────────────────────────────────
+
+    def update(self, dt: float, all_agents: List['Agent'], sim_time: float, sim: 'Simulation'):
         self.sim_time = sim_time
+
+        # PAC panic update must happen every tick
         self.update_panic_pac(dt)
 
-        if self.panic_delay_remaining > 0:
+        if self.panic_delay_remaining > 0.0:
             self.panic_delay_remaining = max(0.0, self.panic_delay_remaining - dt)
+
+        self.update_perception(sim_time)
+        self.check_sweeps(sim_time)
+        self.update_navigation(sim, all_agents)
 
         self._wander_timer -= dt
         if self._wander_timer <= 0:
-            self._target_angle = self.angle + random.gauss(0, 0.8)
+            if not self.current_path_points and not self.follow_crowd_only:
+                self._target_angle = self.angle + random.gauss(0, 0.8)
             self._wander_timer = random.uniform(0.8, 2.5)
 
         diff = (self._target_angle - self.angle + math.pi) % math.tau - math.pi
-        self.angle = (self.angle + diff * min(1.0, dt * 4)) % math.tau
+        self.angle = (self.angle + diff * min(1.0, dt * 4.0)) % math.tau
 
         rx, ry = self.walk_map.wall_repulsion(self.x, self.y)
 
@@ -400,10 +667,12 @@ class Agent(CoreAgent):
                 continue
             dx, dy = self.x - other.x, self.y - other.y
             dist = math.hypot(dx, dy)
-            if dist < effective_neighbor_radius and dist > 0:
-                push = max(0, (effective_neighbor_radius - dist)) / max(effective_neighbor_radius, 1e-6)
+
+            if dist < effective_neighbor_radius and dist > 1e-6:
+                push = max(0.0, (effective_neighbor_radius - dist)) / max(effective_neighbor_radius, 1e-6)
                 sx += (dx / dist) * push * 60
                 sy += (dy / dist) * push * 60
+
             if dist < FOV_RANGE and self._in_fov(other.x, other.y):
                 self.fov_visible_ids.add(other.id)
 
@@ -433,18 +702,29 @@ class Agent(CoreAgent):
         if len(self.known_map_cells) < MAX_KNOWN_CELLS:
             self.known_map_cells.add((int(self.x) // 10, int(self.y) // 10))
 
-        self.update_perception(sim_time)
-        self.check_sweeps(sim_time)
         self.manage_memory(all_agents, sim_time)
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  Simulation
+# ══════════════════════════════════════════════════════════════════════
 
 class Simulation:
     def __init__(self, walk_map: WalkMap, zone_config: dict):
         self.walk_map = walk_map
         self.agents: List[Agent] = []
         self.sim_time = 0.0
+
+        # Shared world registers
         self.exits: Dict[int, Tuple[float, float]] = {}
         self.hazards: Dict[int, Tuple[float, float]] = {}
+
+        # Navigation graph
+        self.nav_nodes: Dict[int, NavNode] = {}
+        self.nav_graph: Dict[int, List[Tuple[int, float]]] = {}
+        self.exit_node_lookup: Dict[int, int] = {}
+        self._next_nav_node_id = 1
+
         nm_path = Path("navmesh.json")
         self.navmesh = NavMesh(
             walk_map,
@@ -465,7 +745,9 @@ class Simulation:
         else:
             self.navmesh.build()
             self.navmesh.save("navmesh.json")
+
         self._spawn_agents(zone_config)
+        self.build_navigation_graph()
 
     def _spawn_agents(self, cfg: dict):
         Agent._id_counter = 0
@@ -547,28 +829,150 @@ class Simulation:
         labels = watershed(-dist, markers, mask=binary)
         return labels
 
+    # ── Navigation graph ────────────────────────────────────────────
+
+    def _add_nav_node(self, kind: str, pos: Tuple[float, float]) -> int:
+        nid = self._next_nav_node_id
+        self._next_nav_node_id += 1
+        self.nav_nodes[nid] = NavNode(nid, kind, pos)
+        self.nav_graph[nid] = []
+        return nid
+
+    def _link_nav_nodes(self, a: int, b: int):
+        pa = self.nav_nodes[a].pos
+        pb = self.nav_nodes[b].pos
+        cost = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+        self.nav_graph[a].append((b, cost))
+        self.nav_graph[b].append((a, cost))
+
+    def _line_walkable(self, a: Tuple[float, float], b: Tuple[float, float], step: float = 6.0) -> bool:
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        dist = math.hypot(dx, dy)
+        if dist < 1e-6:
+            return True
+        n = max(1, int(dist / step))
+        for i in range(n + 1):
+            t = i / n
+            x = a[0] + dx * t
+            y = a[1] + dy * t
+            if not self.walk_map.is_walkable(x, y):
+                return False
+        return True
+
+    def build_navigation_graph(self):
+        self.nav_nodes.clear()
+        self.nav_graph.clear()
+        self.exit_node_lookup.clear()
+        self._next_nav_node_id = 1
+
+        for exit_id, pos in self.exits.items():
+            nid = self._add_nav_node("exit", pos)
+            self.exit_node_lookup[exit_id] = nid
+
+        sampled = []
+        step = 80
+        margin = 20
+        for y in range(margin, self.walk_map.h - margin, step):
+            for x in range(margin, self.walk_map.w - margin, step):
+                if self.walk_map.is_walkable(x, y) and self.walk_map.dist[y, x] > AGENT_RADIUS * 2:
+                    sampled.append((float(x), float(y)))
+
+        for pos in sampled:
+            self._add_nav_node("waypoint", pos)
+
+        node_ids = list(self.nav_nodes.keys())
+        for i, a in enumerate(node_ids):
+            pa = self.nav_nodes[a].pos
+            for b in node_ids[i + 1:]:
+                pb = self.nav_nodes[b].pos
+                d = math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+                if d <= GRAPH_LINK_RADIUS and self._line_walkable(pa, pb):
+                    self._link_nav_nodes(a, b)
+
+    def find_nearest_graph_node(self, pos: Tuple[float, float]) -> Optional[int]:
+        best_id, best_d = None, float("inf")
+        for nid, node in self.nav_nodes.items():
+            d = math.hypot(node.pos[0] - pos[0], node.pos[1] - pos[1])
+            if d < best_d and self._line_walkable(pos, node.pos):
+                best_d, best_id = d, nid
+        return best_id
+
+    def astar_path(self, start_node: int, goal_node: int) -> List[int]:
+        if start_node == goal_node:
+            return [start_node]
+
+        def heuristic(a: int, b: int) -> float:
+            pa = self.nav_nodes[a].pos
+            pb = self.nav_nodes[b].pos
+            return math.hypot(pa[0] - pb[0], pa[1] - pb[1])
+
+        open_heap = [(heuristic(start_node, goal_node), 0.0, start_node)]
+        came_from: Dict[int, Optional[int]] = {start_node: None}
+        g_score: Dict[int, float] = {start_node: 0.0}
+        closed = set()
+
+        while open_heap:
+            _, g_curr, current = heapq.heappop(open_heap)
+            if current in closed:
+                continue
+
+            if current == goal_node:
+                path = []
+                node = current
+                while node is not None:
+                    path.append(node)
+                    node = came_from[node]
+                path.reverse()
+                return path
+
+            closed.add(current)
+
+            for neighbor, cost in self.nav_graph.get(current, []):
+                if neighbor in closed:
+                    continue
+                tentative = g_curr + cost
+                if tentative < g_score.get(neighbor, float("inf")):
+                    g_score[neighbor] = tentative
+                    came_from[neighbor] = current
+                    f = tentative + heuristic(neighbor, goal_node)
+                    heapq.heappush(open_heap, (f, tentative, neighbor))
+
+        return []
+
+    # ── Hazard trigger ──────────────────────────────────────────────
+
     def trigger_hazard(self, hazard_id: int, hazard_pos: Tuple[float, float], propagation_speed: float = 50.0):
         self.hazards[hazard_id] = hazard_pos
+
         for agent in self.agents:
             dist = math.hypot(agent.x - hazard_pos[0], agent.y - hazard_pos[1])
+
             if agent.check_immediate_awareness(hazard_pos):
                 agent.panic_delay_remaining = 0.0
-                agent.state = AgentState.EVACUATING
-                agent.panic = max(agent.panic, PANIC_SWEEP_THR)
                 continue
+
             agent.panic_delay_remaining = dist / propagation_speed
+
+    # ── Tick/reset ──────────────────────────────────────────────────
 
     def step(self):
         self.sim_time += DT
         for agent in self.agents:
-            agent.update(DT, self.agents, self.sim_time)
+            agent.update(DT, self.agents, self.sim_time, self)
 
     def reset(self, zone_config: dict):
         self.agents.clear()
         self.sim_time = 0.0
         self.hazards.clear()
+        self.exits.clear()
+        self.build_navigation_graph()
         self._spawn_agents(zone_config)
+        self.build_navigation_graph()
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  View
+# ══════════════════════════════════════════════════════════════════════
 
 class SimView(QWidget):
     def __init__(self):
@@ -613,8 +1017,8 @@ class SimView(QWidget):
     def mousePressEvent(self, event):
         if self.sim is None:
             return
-        wx, wy = self._s2w(event.position().x(), event.position().y())
 
+        wx, wy = self._s2w(event.position().x(), event.position().y())
         win = self.window()
         if hasattr(win, "handle_map_click") and win.handle_map_click(wx, wy):
             self.update()
@@ -627,6 +1031,7 @@ class SimView(QWidget):
             d = math.hypot(a.x - wx, a.y - wy)
             if d < best_d:
                 best_d, best = d, a
+
         if self.selected_agent:
             self.selected_agent.selected = False
         self.selected_agent = best
@@ -637,16 +1042,16 @@ class SimView(QWidget):
     def paintEvent(self, _):
         if self.sim is None:
             return
+
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         s, ox, oy = self._layout()
 
         if self.bg_pixmap:
-            from PyQt6.QtCore import QRectF
             iw, ih = self.bg_pixmap.width(), self.bg_pixmap.height()
             p.drawPixmap(QRectF(ox, oy, iw * s, ih * s).toRect(), self.bg_pixmap)
 
-        if self.show_navmesh and hasattr(self.sim, 'navmesh'):
+        if self.show_navmesh and hasattr(self.sim, "navmesh"):
             self.sim.navmesh.draw_debug(p, s, ox, oy)
 
         if self.show_explored and self.selected_agent:
@@ -656,18 +1061,31 @@ class SimView(QWidget):
                 scx, scy = self._w2s(cx * 10, cy * 10)
                 p.drawRect(int(scx), int(scy), int(10 * s), int(10 * s))
 
-        for _, (x, y) in self.sim.exits.items():
+        # Draw exits
+        for eid, (x, y) in self.sim.exits.items():
             ex, ey = self._w2s(x, y)
             p.setPen(QPen(QColor(0, 255, 120), 2))
             p.setBrush(QBrush(QColor(0, 255, 120, 120)))
             p.drawEllipse(QPointF(ex, ey), 8, 8)
 
-        for _, (x, y) in self.sim.hazards.items():
+        # Draw hazards
+        for hid, (x, y) in self.sim.hazards.items():
             hx, hy = self._w2s(x, y)
             p.setPen(QPen(QColor(255, 80, 40), 2))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawLine(QPointF(hx - 8, hy - 8), QPointF(hx + 8, hy + 8))
             p.drawLine(QPointF(hx - 8, hy + 8), QPointF(hx + 8, hy - 8))
+
+        if self.selected_agent and self.selected_agent.current_path_points:
+            p.setPen(QPen(QColor(80, 220, 255, 180), 2))
+            prev = (self.selected_agent.x, self.selected_agent.y)
+            for wp in self.selected_agent.current_path_points[self.selected_agent.path_index:]:
+                x1, y1 = self._w2s(*prev)
+                x2, y2 = self._w2s(*wp)
+                p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+                p.setBrush(QBrush(QColor(80, 220, 255, 180)))
+                p.drawEllipse(QPointF(x2, y2), 4, 4)
+                prev = wp
 
         for a in self.sim.agents:
             ax, ay = self._w2s(a.x, a.y)
@@ -681,11 +1099,9 @@ class SimView(QWidget):
                 steps = 12
                 for i in range(steps + 1):
                     t = -fov_half + i * (2 * fov_half / steps)
-                    angle = a.angle + t
-                    path.lineTo(
-                        ax + math.cos(angle) * fov_range_scaled,
-                        ay + math.sin(angle) * fov_range_scaled
-                    )
+                    ang = a.angle + t
+                    path.lineTo(ax + math.cos(ang) * fov_range_scaled,
+                                ay + math.sin(ang) * fov_range_scaled)
                 path.closeSubpath()
                 p.setPen(Qt.PenStyle.NoPen)
                 alpha = 60 if a.selected else 18
@@ -694,9 +1110,9 @@ class SimView(QWidget):
 
             if self.show_memory and a.selected:
                 for m in a.memory_entries:
-                    mx2, my2 = self._w2s(m.position[0], m.position[1])
+                    mx, my = self._w2s(*m.position)
                     age = (self.sim.sim_time - m.time_seen) / MEMORY_DECAY
-                    alpha = int(180 * max(0.0, 1 - age))
+                    alpha = int(180 * max(0.0, 1.0 - age))
                     if m.kind == "exit":
                         color = QColor(0, 255, 100, alpha)
                     elif m.kind == "hazard":
@@ -705,7 +1121,7 @@ class SimView(QWidget):
                         color = QColor(180, 180, 255, alpha)
                     p.setPen(QPen(color, 2))
                     p.setBrush(QBrush(color))
-                    p.drawEllipse(QPointF(mx2, my2), 4, 4)
+                    p.drawEllipse(QPointF(mx, my), 4, 4)
 
             if a.selected:
                 p.setPen(QPen(QColor(255, 255, 0), 2))
@@ -720,17 +1136,22 @@ class SimView(QWidget):
             arrow_len = r * 1.8
             ex = ax + math.cos(a.angle) * arrow_len
             ey = ay + math.sin(a.angle) * arrow_len
-            p.setPen(QPen(QColor(255, 255, 255, 200), max(1, r * 0.4)))
+            p.setPen(QPen(QColor(255, 255, 255, 200), max(1, int(r * 0.4))))
             p.drawLine(QPointF(ax, ay), QPointF(ex, ey))
 
         p.end()
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  Inspector
+# ══════════════════════════════════════════════════════════════════════
 
 class InspectorPanel(QFrame):
     def __init__(self):
         super().__init__()
         self.setObjectName("card")
         self.setFixedWidth(260)
+
         lv = QVBoxLayout(self)
         lv.setContentsMargins(12, 12, 12, 12)
         lv.setSpacing(6)
@@ -744,7 +1165,8 @@ class InspectorPanel(QFrame):
         self.speed_label = QLabel("")
         self.panic_label = QLabel("")
         self.cells_label = QLabel("")
-        for lbl in [self.id_label, self.pos_label, self.speed_label, self.panic_label, self.cells_label]:
+        self.goal_label = QLabel("")
+        for lbl in [self.id_label, self.pos_label, self.speed_label, self.panic_label, self.cells_label, self.goal_label]:
             lbl.setStyleSheet("color:#ccc; font-size:9pt;")
             lv.addWidget(lbl)
 
@@ -767,13 +1189,14 @@ class InspectorPanel(QFrame):
         lv.addWidget(self.memory_scroll, 1)
         lv.addStretch()
 
-    def update_agent(self, agent: Optional['Agent'], sim_time: float):
+    def update_agent(self, agent: Optional[Agent], sim_time: float):
         if agent is None:
             self.id_label.setText("Click an agent to inspect")
             self.pos_label.setText("")
             self.speed_label.setText("")
             self.panic_label.setText("")
             self.cells_label.setText("")
+            self.goal_label.setText("")
             self._clear_memory()
             return
 
@@ -783,11 +1206,20 @@ class InspectorPanel(QFrame):
         self.panic_label.setText(f"Panic:      {agent.panic:.2f} ({agent.panic_state_name})")
         self.cells_label.setText(f"Explored:   {len(agent.known_map_cells)} cells")
 
+        if agent.follow_crowd_only:
+            nav_text = "Nav:        crowd-follow"
+        elif agent.current_exit_id is not None:
+            nav_text = f"Nav:        exit {agent.current_exit_id}, wp {agent.path_index + 1}/{max(1, len(agent.current_path_points))}"
+        else:
+            nav_text = "Nav:        no route"
+        self.goal_label.setText(nav_text)
+
         self._clear_memory()
         if not agent.memory_entries:
             lbl = QLabel("  (nothing yet)")
             lbl.setStyleSheet("color:#555; font-size:8pt;")
             self.memory_layout.addWidget(lbl)
+
         for m in sorted(agent.memory_entries, key=lambda x: -x.time_seen):
             age = sim_time - m.time_seen
             text = f"  [{m.kind:6s}]  ({m.position[0]:.0f},{m.position[1]:.0f})  {age:.1f}s ago"
@@ -808,6 +1240,10 @@ class InspectorPanel(QFrame):
             if item.widget():
                 item.widget().deleteLater()
 
+
+# ══════════════════════════════════════════════════════════════════════
+#  Main window
+# ══════════════════════════════════════════════════════════════════════
 
 class MainWindow(QMainWindow):
     STYLE = """
@@ -965,6 +1401,7 @@ class MainWindow(QMainWindow):
 
         if self.add_exit_mode:
             self.sim.exits[self.next_exit_id] = (x, y)
+            self.sim.build_navigation_graph()
             self.next_exit_id += 1
             self.add_exit_mode = False
             self.add_exit_btn.setChecked(False)
