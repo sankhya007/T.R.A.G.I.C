@@ -22,11 +22,11 @@ CFG = {
     "output":      "continuum_agent_paths.png",
 
     "DT":          0.05,
-    "MAX_TIME":    120,
-    "speed_px_s":  55.0,
+    "MAX_TIME":    40,
+    "speed_px_s":  150.0,
     "exit_radius": 22,
 
-    "grid_res":    4,
+    "grid_res":    2,
     "alpha": 0.3,
     "beta":  0.7,
 
