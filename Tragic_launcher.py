@@ -808,6 +808,8 @@ class View2_ZoneEditor(QWidget):
         self.color_map = {}
         self.density_map = {}
         self.highlight = None
+        self.exits = []   # list of {"x": int, "y": int}
+        self.exit_mode = False
         self._build_ui()
 
     def _build_ui(self):
@@ -886,6 +888,25 @@ class View2_ZoneEditor(QWidget):
         self.zone_list_layout.setContentsMargins(0, 0, 0, 0)
         zone_scroll.setWidget(self.zone_list_widget)
         lv.addWidget(zone_scroll)
+
+        # exit placement block 
+        lv.addWidget(self._sep())
+        lv.addWidget(self._section_label("EXIT PLACEMENT"))
+
+        self.exit_mode_btn = QPushButton("Place Exits")
+        self.exit_mode_btn.setCheckable(True)
+        self.exit_mode_btn.setEnabled(False)
+        self.exit_mode_btn.clicked.connect(self._toggle_exit_mode)
+        lv.addWidget(self.exit_mode_btn)
+
+        self.exit_info_label = QLabel("No exits placed yet.")
+        self.exit_info_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
+        self.exit_info_label.setWordWrap(True)
+        lv.addWidget(self.exit_info_label)
+
+        clear_exits_btn = QPushButton("Clear Exits")
+        clear_exits_btn.clicked.connect(self._clear_exits)
+        lv.addWidget(clear_exits_btn)
 
         lv.addWidget(self._sep())
         lv.addWidget(self._section_label("SAVE CONFIG"))
@@ -1024,7 +1045,16 @@ class View2_ZoneEditor(QWidget):
         self.zone_count_label.setText(f"{len(valid_zones)} zones detected")
         self.zone_info.setText(f"{len(valid_zones)} zones detected.\nClick any zone to set its density.")
         self._refresh_map()
+        
+        # zone selection using mouse click 
         self._rebuild_zone_list()
+        self.exit_mode_btn.setEnabled(True)
+        self.exits = []
+        self._update_exit_info()
+        
+        self.exit_mode_btn.setEnabled(True)
+        self.exits = []
+        self._update_exit_info() # exit updates 
 
     def _build_colors(self, zones):
         colors = {}
@@ -1059,6 +1089,12 @@ class View2_ZoneEditor(QWidget):
             d = self.density_map.get(zid, 1.0)
             cv2.putText(rgb, f"{i}:{d:.1f}", (cx - 15, cy + 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+        # Draw exits
+        for i, ex in enumerate(self.exits):
+            cv2.circle(rgb, (int(ex["x"]), int(ex["y"])), 18, (0, 220, 80), -1)
+            cv2.putText(rgb, f"E{i+1}", (int(ex["x"]) - 12, int(ex["y"]) + 6),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
 
         qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
@@ -1073,7 +1109,7 @@ class View2_ZoneEditor(QWidget):
         self._map_offset = ((self.map_label.width() - pix.width()) // 2,
                             (self.map_label.height() - pix.height()) // 2)
 
-    def _map_click(self, event):
+    def _map_click(self, event): # modified to handle both zone selection and exit placement
         if self.labels is None:
             return
         ox, oy = self._map_offset if hasattr(self, '_map_offset') else (0, 0)
@@ -1082,6 +1118,22 @@ class View2_ZoneEditor(QWidget):
         py = int((event.position().y() - oy) * sy)
         px = np.clip(px, 0, self.labels.shape[1] - 1)
         py = np.clip(py, 0, self.labels.shape[0] - 1)
+
+        # EXIT MODE — place or remove exits
+        if self.exit_mode:
+            SNAP = 30
+            for i, ex in enumerate(self.exits):
+                if abs(ex["x"] - px) < SNAP and abs(ex["y"] - py) < SNAP:
+                    self.exits.pop(i)
+                    self._update_exit_info()
+                    self._refresh_map()
+                    return
+            self.exits.append({"x": int(px), "y": int(py)})
+            self._update_exit_info()
+            self._refresh_map()
+            return
+
+        # zone selection
         zid = int(self.labels[py, px])
         if zid not in self.valid_zones:
             return
@@ -1140,6 +1192,28 @@ class View2_ZoneEditor(QWidget):
             self.zone_list_layout.addWidget(lbl)
         self.zone_list_layout.addStretch()
 
+    # three blocks underneath are for exit placement and management
+    def _toggle_exit_mode(self, checked):
+        self.exit_mode = checked
+        if checked:
+            self.exit_mode_btn.setText("Exit Mode ON (click map)")
+            self.exit_mode_btn.setStyleSheet(f"background: {DARK['success']}; color: white; font-weight: bold;")
+        else:
+            self.exit_mode_btn.setText("Place Exits")
+            self.exit_mode_btn.setStyleSheet("")
+
+    def _clear_exits(self):
+        self.exits = []
+        self._update_exit_info()
+        self._refresh_map()
+
+    def _update_exit_info(self):
+        n = len(self.exits)
+        if n == 0:
+            self.exit_info_label.setText("No exits placed yet.")
+        else:
+            self.exit_info_label.setText(f"{n} exit(s) placed. Click near one to remove it.")
+
     def _save_config(self):
         if not self.valid_zones:
             QMessageBox.warning(self, "No zones", "Load a mask and detect zones first.")
@@ -1155,6 +1229,7 @@ class View2_ZoneEditor(QWidget):
             "mask_path": self.state.mask_path,
             "base_density": self.base_spin.value(),
             "agent_scale": 1000,
+            "exits": self.exits,
             "zones": []
         }
         for i, zid in enumerate(self.valid_zones):
