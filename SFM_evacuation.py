@@ -16,7 +16,7 @@ from collections import deque
 
 # ── CONFIG ──────────────────────────────────────────────────────────────
 MASK_PATH   = "stitched_mask.png"
-CONFIG_PATH = "stitched_mask_zone_config.json"
+CONFIG_PATH = "zone_config.json"
 OUT_PATHS   = "output_paths.png"
 OUT_REPORT  = "output_report.txt"
 
@@ -501,7 +501,8 @@ lines += [
 ]
 
 report = "\n".join(lines)
-print("\n" + report)
-with open(OUT_REPORT, "w") as f:
+#print("\n" + report) # get replaced bitch 
+print("\n" + report.encode("ascii", errors="replace").decode("ascii"))
+with open(OUT_REPORT, "w", encoding="utf-8") as f:
     f.write(report)
 print(f"\nSaved: {OUT_REPORT}")

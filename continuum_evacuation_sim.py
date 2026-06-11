@@ -36,7 +36,7 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QImage, QPixmap, QPainte
 CFG = {
     # Grid resolution for the potential field (pixels per cell)
     # Smaller = more accurate but slower
-    "grid_res": 4,
+    "grid_res": 1,
 
     # Agent parameters
     "agent_radius": 5,          # pixels (for rendering + separation)

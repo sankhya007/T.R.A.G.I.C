@@ -712,7 +712,8 @@ class View1_MapParser(QWidget):
             self.tweak_btn.setVisible(False)
             self.proceed_btn.setVisible(False)
             self.preview_info.setText("")
-
+            self.preview.load_image(path) # to show the original image before parsing
+            
     def _run(self):
         if not self.state.image_path:
             return
@@ -1268,7 +1269,6 @@ MODEL_CONFIGS = {
         "script": "SFM_evacuation.py",
         "output": "SFM_agent_paths.png",
         "params": [
-            ("Agent Count",       "agent_count",       "int",   10,  2000, 100,  10, 0, "Number of agents to simulate"),
             ("Speed Min (px/s)",  "speed_min",         "float", 0.5, 5.0,  0.8,  0.1, 1, "Minimum agent walking speed"),
             ("Speed Max (px/s)",  "speed_max",         "float", 0.5, 5.0,  1.8,  0.1, 1, "Maximum agent walking speed"),
             ("Relaxation Time",   "relaxation_time",   "float", 0.1, 2.0,  0.5,  0.1, 2, "How quickly agents reach desired speed (τ)"),
@@ -1284,7 +1284,6 @@ MODEL_CONFIGS = {
         "script": "RVO_Evacuation.py",
         "output": "RVO_agent_paths.png",
         "params": [
-            ("Agent Count",       "agent_count",       "int",   10,  2000, 100,  10, 0, "Number of agents to simulate"),
             ("Speed Min (px/s)",  "speed_min",         "float", 0.5, 5.0,  0.8,  0.1, 1, "Minimum agent walking speed"),
             ("Speed Max (px/s)",  "speed_max",         "float", 0.5, 5.0,  1.8,  0.1, 1, "Maximum agent walking speed"),
             ("Time Horizon (s)",  "time_horizon",      "float", 0.5, 10.0, 2.0,  0.5, 1, "How far ahead agents look for collisions"),
@@ -1300,7 +1299,6 @@ MODEL_CONFIGS = {
         "script": "continuum_evacuation_path.py",
         "output": "continuum_agent_paths.png",
         "params": [
-            ("Agent Count",       "agent_count",       "int",   10,  2000, 100,  10, 0, "Number of agents to simulate"),
             ("Speed (px/s)",      "speed",             "float", 0.5, 10.0, 2.0,  0.5, 1, "Agent movement speed along flow field"),
             ("Step Size",         "step_size",         "float", 0.1, 5.0,  1.0,  0.1, 1, "Integration step size for path tracing"),
             ("Max Steps",         "max_steps",         "int",   100, 5000, 2000, 100, 0, "Maximum path trace steps per agent"),
@@ -1314,7 +1312,6 @@ MODEL_CONFIGS = {
         "script": "CA_evacuation.py",
         "output": "CA_agent_paths.png",
         "params": [
-            ("Agent Count",       "agent_count",       "int",   10,  2000, 100,  10, 0, "Number of agents to simulate"),
             ("Cell Size (px)",    "cell_size",         "int",   4,   32,   8,    2,  0, "Size of each grid cell in pixels"),
             ("Time Steps",        "time_steps",        "int",   50,  5000, 500,  50, 0, "Number of simulation time steps"),
             ("Move Probability",  "move_prob",         "float", 0.1, 1.0,  0.9,  0.05, 2, "Probability an agent moves each step"),
@@ -1327,43 +1324,51 @@ MODEL_CONFIGS = {
 
 def _run_simulation(script_name, params, mask_path, zone_config_path,
                     output_path, progress_cb=None):
-    """Launch simulation script as a subprocess, passing params as env vars."""
-    import os
-    env = os.environ.copy()
-    env["TRAGIC_MASK_PATH"]       = mask_path
-    env["TRAGIC_ZONE_CONFIG"]     = zone_config_path
-    env["TRAGIC_OUTPUT_PATH"]     = output_path
-    for k, v in params.items():
-        env[f"TRAGIC_{k.upper()}"] = str(v)
+    import os, shutil
+
+    if Path(mask_path).resolve() != Path("stitched_mask.png").resolve():
+        shutil.copy2(mask_path, "stitched_mask.png")
+    if Path(zone_config_path).resolve() != Path("stitched_mask_zone_config.json").resolve():
+        shutil.copy2(zone_config_path, "stitched_mask_zone_config.json")
+    if Path(zone_config_path).resolve() != Path("zone_config.json").resolve():
+        shutil.copy2(zone_config_path, "zone_config.json")
 
     if progress_cb:
-        progress_cb(5, f"Launching {script_name}...")
+        progress_cb(10, f"Running {script_name}...")
 
     proc = subprocess.Popen(
         [sys.executable, script_name],
-        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
 
-    if progress_cb:
-        progress_cb(10, "Simulation running...")
-
-    # Stream output and look for progress hints
     pct = 10
     for line in proc.stdout:
         line = line.strip()
-        if "%" in line or "step" in line.lower() or "agent" in line.lower():
-            pct = min(pct + 5, 90)
+        if line:
+            pct = min(pct + 2, 90)
             if progress_cb:
                 progress_cb(pct, line[:80])
 
     proc.wait()
+
     if proc.returncode != 0:
         raise RuntimeError(f"{script_name} exited with code {proc.returncode}")
 
-    if not Path(output_path).exists():
+    script_outputs = {
+        "SFM_evacuation.py":            "output_paths.png",
+        "RVO_evacuation.py":            "output/rvo_agent_paths.png",
+        "continuum_evacuation_path.py": "continuum_agent_paths.png",
+        "CA_evacuation.py":             "output_ca_paths.png",
+    }
+    actual_out = script_outputs.get(script_name)
+    if actual_out and Path(actual_out).exists():
+        if Path(actual_out).resolve() != Path(output_path).resolve():
+            shutil.copy2(actual_out, output_path)
+    elif not Path(output_path).exists():
         raise RuntimeError(f"Output file not found: {output_path}")
 
     if progress_cb:
@@ -1619,6 +1624,7 @@ class View3_Simulation(QWidget):
         else:
             self.status_label.setText(f"✗ {msg}")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
+            print(f"SIMULATION ERROR: {msg}")
 
     def _save_image(self):
         if not self.state.output_image_path or not Path(self.state.output_image_path).exists():
