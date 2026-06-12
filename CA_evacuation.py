@@ -14,9 +14,9 @@ from collections import deque
 # ══════════════════════════════════════════════════════════════════════
 CONFIG = {
     "mask_path":    "stitched_mask.png",
-    "config_path":  "stitched_mask_zone_config.json",
-    "out_image":    "output_ca_paths.png",
-    "out_report":   "output_ca_report.txt",
+    "config_path":  "zone_config.json",
+    "out_image":    "output/ca_paths.png",
+    "out_report":   "output/ca_report.txt",
 
     "dt":           0.05,    # seconds per tick
     "max_time":     120.0,   # hard cap in seconds
@@ -451,6 +451,7 @@ def print_report(analysis, exits_cfg, cfg):
 
 def main():
     C = CONFIG
+    import os as _os; _os.makedirs("output", exist_ok=True)
     img, walkable, walk_u8, H, W = load_mask(C["mask_path"])
 
     with open(C["config_path"]) as f:

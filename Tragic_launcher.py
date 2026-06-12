@@ -1287,7 +1287,7 @@ MODEL_CONFIGS = {
         "display": "Social Force Model",
         "desc": "Physics-based pedestrian dynamics using attractive/repulsive force fields.",
         "script": "SFM_evacuation.py",
-        "output": "SFM_agent_paths.png",
+        "output": "output/sfm_agent_paths.png",
         "params": [
             ("Speed Min (px/s)",  "speed_min",         "float", 0.5, 5.0,  0.8,  0.1, 1, "Minimum agent walking speed"),
             ("Speed Max (px/s)",  "speed_max",         "float", 0.5, 5.0,  1.8,  0.1, 1, "Maximum agent walking speed"),
@@ -1301,8 +1301,8 @@ MODEL_CONFIGS = {
     "RVO": {
         "display": "Reciprocal Velocity Obstacles",
         "desc": "Geometric collision avoidance — agents compute collision-free velocities in real time.",
-        "script": "RVO_Evacuation.py",
-        "output": "RVO_agent_paths.png",
+        "script": "RVO_evacuation.py",
+        "output": "output/rvo_agent_paths.png",
         "params": [
             ("Speed Min (px/s)",  "speed_min",         "float", 0.5, 5.0,  0.8,  0.1, 1, "Minimum agent walking speed"),
             ("Speed Max (px/s)",  "speed_max",         "float", 0.5, 5.0,  1.8,  0.1, 1, "Maximum agent walking speed"),
@@ -1317,21 +1317,23 @@ MODEL_CONFIGS = {
         "display": "Continuum Crowds",
         "desc": "Treuille et al. 2006 — flow field approach treating the crowd as a fluid continuum.",
         "script": "continuum_evacuation_path.py",
-        "output": "continuum_agent_paths.png",
+        "output": "output/continuum_agent_paths.png",
         "params": [
-            ("Speed (px/s)",      "speed",             "float", 0.5, 10.0, 2.0,  0.5, 1, "Agent movement speed along flow field"),
-            ("Grid Resolution",   "grid_res",          "int",   1,   8,    2,    1,  0, "Pixels per potential field cell. 1=finest but slowest, 4=fast"),
-            ("Step Size",         "step_size",         "float", 0.1, 5.0,  1.0,  0.1, 1, "Integration step size for path tracing"),
-            ("Max Steps",         "max_steps",         "int",   100, 5000, 2000, 100, 0, "Maximum path trace steps per agent"),
-            ("Gradient Blur σ",   "gradient_blur",     "float", 0.5, 5.0,  1.0,  0.5, 1, "Gaussian blur on distance field before gradient"),
-            ("Path Accumulation", "log_accumulate",    "int",   1,   10,   3,    1,  0, "Log-scale path brightness multiplier"),
+            ("Time Step (DT)",    "DT",            "float", 0.01, 0.2,  0.05,  0.01, 2, "Simulation timestep in seconds"),
+            ("Max Time (s)",      "MAX_TIME",      "float", 10,   200,  40,    10,   0, "Hard cap on simulation duration"),
+            ("Speed (px/s)",      "speed_px_s",    "float", 10,   300,  150,   10,   0, "Agent movement speed in pixels per second"),
+            ("Grid Resolution",   "grid_res",      "int",   2,    8,    4,     1,    0, "Pixels per potential field cell. Higher = faster but less accurate"),
+            ("Density Radius",    "density_radius","int",   2,    20,   6,     1,    0, "Pixel radius for agent density splatting"),
+            ("Agent Radius",      "agent_radius",  "int",   2,    20,   6,     1,    0, "Agent body radius for repulsion"),
+            ("Repulse Range",     "repulse_range", "float", 4,    40,   14,    1,    0, "Range in pixels of agent-agent repulsion"),
+            ("Relax Time",        "relax_time",    "float", 0.1,  2.0,  0.3,   0.1,  1, "Velocity relaxation time constant"),
         ]
     },
     "CA": {
         "display": "Cellular Automata",
         "desc": "Grid-based discrete-time model — agents on cells, local rules govern movement.",
         "script": "CA_evacuation.py",
-        "output": "output_ca_paths.png",
+        "output": "output/ca_paths.png",
         "params": [
             ("Cell Size (px)",    "cell_size",         "int",   4,   32,   8,    2,  0, "Size of each grid cell in pixels"),
             ("Time Steps",        "time_steps",        "int",   50,  5000, 500,  50, 0, "Number of simulation time steps"),
@@ -1347,6 +1349,8 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
                     output_path, progress_cb=None):
     import os, shutil
 
+    Path("output").mkdir(exist_ok=True)
+
     if Path(mask_path).resolve() != Path("stitched_mask.png").resolve():
         shutil.copy2(mask_path, "stitched_mask.png")
     if Path(zone_config_path).resolve() != Path("stitched_mask_zone_config.json").resolve():
@@ -1358,9 +1362,9 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
         progress_cb(10, f"Running {script_name}...")
 
     script_args = {
-        "RVO_Evacuation.py": ["stitched_mask.png", "stitched_mask_zone_config.json"],
+        "RVO_evacuation.py": ["stitched_mask.png", "stitched_mask_zone_config.json"],
     }
-    
+
     proc = subprocess.Popen(
         [sys.executable, script_name] + script_args.get(script_name, []),
         stdout=subprocess.PIPE,
@@ -1383,33 +1387,37 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
     if proc.returncode != 0:
         raise RuntimeError(f"{script_name} exited with code {proc.returncode}")
 
+    # where each script actually writes its image output
     script_outputs = {
-        "SFM_evacuation.py":            "output_paths.png",
-        "RVO_Evacuation.py":            "output/rvo_agent_paths.png",
-        "continuum_evacuation_path.py": "continuum_agent_paths.png",
-        "CA_evacuation.py":             "output_ca_paths.png",
+        "SFM_evacuation.py":            "output/sfm_agent_paths.png",
+        "RVO_evacuation.py":            "output/rvo_agent_paths.png",
+        "continuum_evacuation_path.py": "output/continuum_agent_paths.png",
+        "CA_evacuation.py":             "output/ca_paths.png",
     }
+    # where each script writes its text report
     script_reports = {
-        "SFM_evacuation.py":            "output_report.txt",
-        "RVO_Evacuation.py":            "output/rvo_analytics.csv",
-        "continuum_evacuation_path.py": None,
-        "CA_evacuation.py":             "output_ca_report.txt",
+        "SFM_evacuation.py":            "output/SFM_output_report.txt",
+        "RVO_evacuation.py":            "output/RVO_output_report.txt",
+        "continuum_evacuation_path.py": "output/continuum_report.txt",
+        "CA_evacuation.py":             "output/ca_report.txt",
     }
+
+    # copy image to output/ destination expected by MODEL_CONFIGS
     actual_out = script_outputs.get(script_name)
     if actual_out and Path(actual_out).exists():
         if Path(actual_out).resolve() != Path(output_path).resolve():
-            shutil.copy2(actual_out, output_path)
+            import shutil as _sh
+            _sh.copy2(actual_out, output_path)
     elif not Path(output_path).exists():
-        raise RuntimeError(f"Output file not found: {output_path}")
+        raise RuntimeError(f"Output image not found: {output_path}")
 
-    # Copy report to a known location so the launcher can find it
+    # copy report to last_sim_report.txt so View Report button works
     report_src = script_reports.get(script_name)
     if report_src and Path(report_src).exists():
-        shutil.copy2(report_src, "last_sim_report.txt")
-    else:
-        # Try to clear stale report
-        if Path("last_sim_report.txt").exists():
-            Path("last_sim_report.txt").unlink()
+        import shutil as _sh
+        _sh.copy2(report_src, "last_sim_report.txt")
+    elif Path("last_sim_report.txt").exists():
+        Path("last_sim_report.txt").unlink()
 
     if progress_cb:
         progress_cb(100, "Simulation complete")

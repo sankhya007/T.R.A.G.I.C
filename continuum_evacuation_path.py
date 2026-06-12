@@ -19,14 +19,14 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 # ══════════════════════════════════════════════════════════════
 CFG = {
     "zone_config": "stitched_mask_zone_config.json",
-    "output":      "continuum_agent_paths.png",
+    "output":      "output/continuum_agent_paths.png",
 
     "DT":          0.05,
     "MAX_TIME":    40,
     "speed_px_s":  150.0,
     "exit_radius": 22,
 
-    "grid_res":    2,
+    "grid_res":    4,
     "alpha": 0.3,
     "beta":  0.7,
 
@@ -313,7 +313,7 @@ def main():
         if not active:
             break
 
-        if step % 10 == 0:
+        if step % 30 == 0:
             grid.splat(agents)
             grid.build_phi()
 
@@ -474,42 +474,53 @@ def main():
     }
 
     sep = "=" * 55
-    print(f"\n{sep}")
-    print("       EVACUATION ANALYSIS REPORT")
-    print(sep)
-    print(f"  OVERALL SCORE : {final_score} / 100")
-    print(f"  Total agents    : {total}")
-    print(f"  Evacuated       : {evac_final}  ({100*rate:.1f}%)")
-    print(f"  Trapped/timeout : {total - evac_final}  ({100*(1-rate):.1f}%)")
+    lines = [
+        f"\n{sep}",
+        "       CONTINUUM EVACUATION ANALYSIS REPORT",
+        sep,
+        f"  OVERALL SCORE : {final_score} / 100",
+        "",
+        f"  Total agents    : {total}",
+        f"  Evacuated       : {evac_final}  ({100*rate:.1f}%)",
+        f"  Trapped/timeout : {total - evac_final}  ({100*(1-rate):.1f}%)",
+    ]
     if times:
-        print(f"  Fastest evac    : {min(times):.1f}s")
-        print(f"  Mean evac time  : {mean_t:.1f}s")
-        print(f"  Slowest evac    : {max(times):.1f}s")
-    print(f"\n{'-'*55}")
-    print("  EXIT UTILIZATION")
-    print(f"{'-'*55}")
+        lines += [
+            f"  Fastest evac    : {min(times):.1f}s",
+            f"  Mean evac time  : {mean_t:.1f}s",
+            f"  Slowest evac    : {max(times):.1f}s",
+        ]
+    lines += ["", "-"*55, "  EXIT UTILIZATION", "-"*55]
     for idx, (ex, ey) in enumerate(exits_px):
         pct    = (exit_counts[idx] / total_evac * 100) if total_evac > 0 else 0
         bar    = "█" * int(pct / 5)
         status = "⚠ UNDERUSED" if pct < (100 / len(exits_px) * 0.4) else ""
-        print(f"  Exit {idx} ({ex},{ey}): {exit_counts[idx]:3d} agents  {pct:5.1f}%  {bar} {status}")
-    print(f"\n{'-'*55}")
-    print("  TOP BOTTLENECKS  (ranked by agent-seconds lost)")
-    print(f"{'-'*55}")
+        lines.append(f"  Exit {idx} ({ex},{ey}): {exit_counts[idx]:3d} agents  {pct:5.1f}%  {bar} {status}")
+    lines += ["", "-"*55, "  TOP BOTTLENECKS  (ranked by agent-seconds lost)", "-"*55]
     for rank, bn in enumerate(top_bn):
-        print(f"  B{rank+1}  position ({bn['cx']:4d},{bn['cy']:4d})  "
-              f"corridor width ~{bn['width_px']}px  "
-              f"{bn['agent_seconds']:.0f} agent-seconds")
-    print(f"\n{'-'*55}")
-    print("  RECOMMENDATION")
-    print(f"{'-'*55}")
-    print(f"  {RECS[worst[0]]}")
-    print(f"\n  Score breakdown:")
-    print(f"    Evacuation rate  : {score_rate:.0f}/50")
-    print(f"    Evacuation speed : {score_time:.0f}/20")
-    print(f"    Exit balance     : {score_bal:.0f}/15")
-    print(f"    Bottleneck sev.  : {score_bn:.0f}/15")
-    print(sep)
+        lines.append(
+            f"  B{rank+1}  position ({bn['cx']:4d},{bn['cy']:4d})  "
+            f"corridor width ~{bn['width_px']}px  "
+            f"{bn['agent_seconds']:.0f} agent-seconds"
+        )
+    lines += [
+        "", "-"*55, "  RECOMMENDATION", "-"*55,
+        f"  {RECS[worst[0]]}",
+        "",
+        "  Score breakdown:",
+        f"    Evacuation rate  : {score_rate:.0f}/50",
+        f"    Evacuation speed : {score_time:.0f}/20",
+        f"    Exit balance     : {score_bal:.0f}/15",
+        f"    Bottleneck sev.  : {score_bn:.0f}/15",
+        sep,
+    ]
+
+    report = "\n".join(lines)
+    print(report)
+    import os as _os; _os.makedirs("output", exist_ok=True)
+    with open("output/continuum_report.txt", "w", encoding="utf-8") as f:
+        f.write(report)
+    print("Saved -> output/continuum_report.txt")
 
     # ── Render ────────────────────────────────────────────────
     print("\nRendering...")

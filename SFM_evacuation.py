@@ -17,8 +17,8 @@ from collections import deque
 # ── CONFIG ──────────────────────────────────────────────────────────────
 MASK_PATH   = "stitched_mask.png"
 CONFIG_PATH = "zone_config.json"
-OUT_PATHS   = "output_paths.png"
-OUT_REPORT  = "output_report.txt"
+OUT_PATHS   = "output/sfm_agent_paths.png"
+OUT_REPORT  = "output/SFM_output_report.txt"
 
 DT       = 0.05
 MAX_TIME = 120
@@ -433,6 +433,7 @@ cv2.rectangle(base, (4, 4), (130, 30), (0, 0, 0), -1)
 cv2.putText(base, f"SCORE: {final_score}/100",
             (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, score_color, 1)
 
+import os as _os; _os.makedirs("output", exist_ok=True)
 cv2.imwrite(OUT_PATHS, base)
 print(f"Saved: {OUT_PATHS}")
 
