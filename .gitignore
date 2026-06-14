@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Model weights
+*.pth
+*.pt
+*.onnx
+
+# Images & outputs
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+*.mp4
+*.avi
+*.gif
+
+# Data & configs (generated)
+*_zone_config.json
+zone_config.json
+
+# Output directories
+output/
+output_paths.png
+debug_raw_mask.png
+
+# Datasets
+dataset/
+used_datasets/
+assets/
+
+# General
+.env
+*.log
+*.csv
