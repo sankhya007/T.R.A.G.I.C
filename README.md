@@ -65,14 +65,16 @@ pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install opencv-python numpy scipy scikit-image PyQt6
 ```
 
-Don't want to train the Model yourself? No problem here is the lin to download:
-```bash
-[Hugging Face Link](https://huggingface.co/sankhya007/Floorplan_parser_STITCH/tree/main)
-```
-
 ```bash
 python Tragic_launcher.py
 ```
+
+Don't want to train the Model yourself? No problem here is the lin to download:
+
+[Hugging Face Link](https://huggingface.co/sankhya007/Floorplan_parser_STITCH/tree/main)
+
+
+
 
 No config files, no environment variables. Everything is driven through the UI.
 
