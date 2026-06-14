@@ -1,0 +1,9 @@
+# T.R.A.G.I.C. — Crowd Evacuation Simulation Toolkit
+# Install with: pip install -r requirements.txt
+
+torch>=2.0.0          # UNet model inference (map parser)
+opencv-python>=4.8.0  # image I/O, morphology, drawing
+numpy>=1.24.0         # arrays, flow fields, density maps
+scipy>=1.11.0         # ndimage, watershed distance transform
+scikit-image>=0.21.0  # peak_local_max, watershed segmentation
+PyQt6>=6.5.0          # GUI — launcher, zone editor, sim viewer
