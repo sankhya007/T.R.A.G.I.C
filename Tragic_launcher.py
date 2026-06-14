@@ -1,7 +1,3 @@
-"""
-this code have the view report button fixed 
-"""
-
 import sys
 import json
 import math

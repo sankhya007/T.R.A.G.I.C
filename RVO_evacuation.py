@@ -1,12 +1,3 @@
-"""
-rvo_evacuation.py  —  RVO-based evacuation on a stitched mask
-Wall-aware: agents follow a BFS flow field so they navigate AROUND walls,
-not through them. RVO handles agent-agent collision avoidance on top.
-
-Usage:
-    python rvo_evacuation.py <mask.png> <zone_config.json>
-"""
-
 import sys, json, time
 from pathlib import Path
 from collections import defaultdict, deque
@@ -110,8 +101,13 @@ def sample_flow(flow, px, py):
     Returns unit direction vector (or zeros if out of bounds / unreachable).
     """
     sh, sw = flow.shape[:2]
-    fx = px / FLOW_SCALE
-    fy = py / FLOW_SCALE
+    if sh == 0 or sw == 0:
+        return np.zeros(2)
+    if not np.isfinite(px) or not np.isfinite(py):
+        return np.zeros(2)
+
+    fx = np.clip(float(px) / FLOW_SCALE, 0.0, sw - 1.0)
+    fy = np.clip(float(py) / FLOW_SCALE, 0.0, sh - 1.0)
 
     x0 = int(fx);  x1 = min(x0+1, sw-1)
     y0 = int(fy);  y1 = min(y0+1, sh-1)

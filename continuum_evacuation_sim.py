@@ -1,17 +1,3 @@
-"""
-continuum_evacuation.py  —  Continuum Crowds Evacuation
-Based on: Treuille, Cooper, Popović — "Continuum Crowds" (SIGGRAPH 2006)
-
-Requires:
-  - stitched_mask.png        (white=wall, black=walkable)
-  - zone_config.json         (zone density + exit positions)
-
-Controls:
-  Space   — Pause / Resume
-  R       — Reset
-  Click   — Inspect agent
-"""
-
 import sys, json, math, random
 import numpy as np
 import cv2

@@ -1,6 +1,3 @@
-# cool this one works perfectly 
-
-
 import torch
 import cv2
 import numpy as np

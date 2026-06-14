@@ -1,9 +1,3 @@
-"""
-continuum_paths.py  —  Continuum Crowds simulation + analysis report
-Reads:  zone_config  +  stitched_mask.png
-Writes: continuum_agent_paths.png  +  prints report to terminal
-"""
-
 import json, math, random, sys, warnings
 import numpy as np
 import cv2

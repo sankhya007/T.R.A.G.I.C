@@ -1,14 +1,3 @@
-"""
-evacuation.py
-Navigation : BFS flow field
-Movement   : Social Force Model
-
-Analysis:
-  1. Bottleneck scoring — top chokepoints ranked by agent-seconds lost
-  2. Exit utilization — traffic share per exit
-  3. Score 0-100 with single recommendation
-"""
-
 import cv2
 import json
 import numpy as np

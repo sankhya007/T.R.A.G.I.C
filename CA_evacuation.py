@@ -1,9 +1,3 @@
-"""
-CA_evacuation.py  —  Cellular Automata Crowd Evacuation
-Navigation : BFS flow field (pre-computed, wall-aware)
-Movement   : CA rules (Moore neighbourhood, stochastic, speed-matched to SFM)
-"""
-
 import cv2
 import json
 import sys
