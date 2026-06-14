@@ -18,6 +18,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # ══════════════════════════════════════════════════════════════
 CFG = {
+    "mask_path":    "",
     "zone_config": "stitched_mask_zone_config.json",
     "output":      "output/continuum_agent_paths.png",
 
@@ -43,6 +44,34 @@ CFG = {
     "exit_color":   (0, 200, 220),
     "additive_scale": 8,
 }
+
+
+def apply_runtime_args():
+    """Allow the launcher to provide the active mask, config, and UI params."""
+    if len(sys.argv) > 1:
+        CFG["mask_path"] = sys.argv[1]
+    if len(sys.argv) > 2:
+        CFG["zone_config"] = sys.argv[2]
+    if len(sys.argv) > 3:
+        params_path = Path(sys.argv[3])
+        if params_path.exists():
+            with open(params_path, "r", encoding="utf-8") as f:
+                params = json.load(f)
+            for key, value in params.items():
+                if key in CFG:
+                    CFG[key] = value
+
+
+def zone_id_mask(labels_array, zid):
+    try:
+        target_id = int(zid) if np.issubdtype(labels_array.dtype, np.integer) else zid
+    except (TypeError, ValueError):
+        target_id = zid
+
+    mask = labels_array == target_id
+    if np.isscalar(mask) or getattr(mask, "ndim", 0) != labels_array.ndim:
+        return np.zeros(labels_array.shape, dtype=bool)
+    return mask
 
 
 class WalkMap:
@@ -226,6 +255,7 @@ def rebuild_labels(mask_path):
 
 
 def main():
+    apply_runtime_args()
     cfg_path = CFG["zone_config"]
     if not Path(cfg_path).exists():
         print(f"ERROR: {cfg_path} not found"); sys.exit(1)
@@ -233,7 +263,7 @@ def main():
     with open(cfg_path) as f:
         zcfg = json.load(f)
 
-    mask_path = zcfg.get("mask_path", "")
+    mask_path = CFG.get("mask_path") or zcfg.get("mask_path", "")
     if not Path(mask_path).exists():
         print(f"ERROR: mask not found at {mask_path}"); sys.exit(1)
 
@@ -271,7 +301,7 @@ def main():
         pool = pool_all
         if zone_labels is not None:
             zid  = z["zone_id"]
-            zm   = (zone_labels == zid) & wm.walkable
+            zm   = zone_id_mask(zone_labels, zid) & wm.walkable
             zy, zx = np.where(zm)
             if len(zx) > 0:
                 pool = list(zip(zx.tolist(), zy.tolist()))
@@ -516,7 +546,7 @@ def main():
     ]
 
     report = "\n".join(lines)
-    print(report)
+    print(report.encode("ascii", errors="replace").decode("ascii"))
     import os as _os; _os.makedirs("output", exist_ok=True)
     with open("output/continuum_report.txt", "w", encoding="utf-8") as f:
         f.write(report)

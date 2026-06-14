@@ -119,10 +119,23 @@ seed_mask[tuple(coords.T)] = True
 markers, _ = ndi.label(seed_mask)
 labels     = watershed(-dist_to_wall, markers, mask=walk_u8)
 
+
+def zone_id_mask(labels_array, zid):
+    try:
+        target_id = int(zid) if np.issubdtype(labels_array.dtype, np.integer) else zid
+    except (TypeError, ValueError):
+        target_id = zid
+
+    mask = labels_array == target_id
+    if np.isscalar(mask) or getattr(mask, "ndim", 0) != labels_array.ndim:
+        return np.zeros(labels_array.shape, dtype=bool)
+    return mask
+
+
 zone_pixels = {}
 for zdata in cfg["zones"]:
     zid    = zdata["zone_id"]
-    ys, xs = np.where(labels == zid)
+    ys, xs = np.where(zone_id_mask(labels, zid))
     valid  = (dist_to_wall[ys, xs] > AGENT_RADIUS) & (cost[ys, xs] >= 0)
     if valid.any():
         zone_pixels[zid] = list(zip(xs[valid].tolist(), ys[valid].tolist()))

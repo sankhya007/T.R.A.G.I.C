@@ -1335,11 +1335,12 @@ MODEL_CONFIGS = {
         "script": "CA_evacuation.py",
         "output": "output/ca_paths.png",
         "params": [
-            ("Cell Size (px)",    "cell_size",         "int",   4,   32,   8,    2,  0, "Size of each grid cell in pixels"),
-            ("Time Steps",        "time_steps",        "int",   50,  5000, 500,  50, 0, "Number of simulation time steps"),
-            ("Move Probability",  "move_prob",         "float", 0.1, 1.0,  0.9,  0.05, 2, "Probability an agent moves each step"),
-            ("Panic Spread Rad.", "panic_radius",      "int",   1,   20,   5,    1,  0, "Cell radius for panic contagion"),
-            ("Panic Threshold",   "panic_threshold",   "float", 0.0, 1.0,  0.3,  0.05, 2, "Density above which panic triggers"),
+            ("Time Step (DT)",       "dt",             "float", 0.01, 0.2,  0.05,  0.01, 2, "Seconds per simulation tick"),
+            ("Max Time (s)",         "max_time",       "float", 10,   600,  120,   10,   0, "Hard cap on simulation duration"),
+            ("Desired Speed (px/s)", "desired_speed",  "float", 10,   200,  55,    5,    0, "Target movement speed for each agent"),
+            ("Wall Clearance (px)",  "agent_wall_min", "int",   1,    30,   6,     1,    0, "Minimum spawn distance from walls"),
+            ("Randomness",           "randomness",     "float", 0.0,  0.5,  0.06,  0.01, 2, "Amount of stochastic movement noise"),
+            ("Exit Radius (px)",     "exit_radius",    "int",   5,    60,   22,    1,    0, "Distance from an exit counted as evacuated"),
         ]
     },
 }
@@ -1351,18 +1352,33 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
 
     Path("output").mkdir(exist_ok=True)
 
-    if Path(mask_path).resolve() != Path("stitched_mask.png").resolve():
-        shutil.copy2(mask_path, "stitched_mask.png")
-    if Path(zone_config_path).resolve() != Path("stitched_mask_zone_config.json").resolve():
-        shutil.copy2(zone_config_path, "stitched_mask_zone_config.json")
-    if Path(zone_config_path).resolve() != Path("zone_config.json").resolve():
-        shutil.copy2(zone_config_path, "zone_config.json")
+    runtime_mask = Path("stitched_mask.png")
+    runtime_zone_config = Path("zone_config.json")
+    runtime_stitched_config = Path("stitched_mask_zone_config.json")
+    runtime_params = Path("output") / "simulation_params.json"
+
+    if Path(mask_path).resolve() != runtime_mask.resolve():
+        shutil.copy2(mask_path, runtime_mask)
+
+    with open(zone_config_path, "r", encoding="utf-8") as f:
+        zone_config = json.load(f)
+    zone_config["mask_path"] = str(runtime_mask)
+
+    for target in (runtime_zone_config, runtime_stitched_config):
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(zone_config, f, indent=2)
+
+    with open(runtime_params, "w", encoding="utf-8") as f:
+        json.dump(params or {}, f, indent=2)
 
     if progress_cb:
         progress_cb(10, f"Running {script_name}...")
 
     script_args = {
-        "RVO_evacuation.py": ["stitched_mask.png", "stitched_mask_zone_config.json"],
+        "SFM_evacuation.py": ["stitched_mask.png", "zone_config.json", str(runtime_params)],
+        "RVO_evacuation.py": ["stitched_mask.png", "stitched_mask_zone_config.json", str(runtime_params)],
+        "continuum_evacuation_path.py": ["stitched_mask.png", "stitched_mask_zone_config.json", str(runtime_params)],
+        "CA_evacuation.py": ["stitched_mask.png", "zone_config.json", str(runtime_params)],
     }
 
     proc = subprocess.Popen(
@@ -1372,12 +1388,15 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
         text=True,
         encoding="utf-8",
         errors="replace",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
 
     pct = 10
+    output_lines = []
     for line in proc.stdout:
         line = line.strip()
         if line:
+            output_lines.append(line)
             pct = min(pct + 2, 90)
             if progress_cb:
                 progress_cb(pct, line[:80])
@@ -1385,6 +1404,9 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
     proc.wait()
 
     if proc.returncode != 0:
+        detail = "\n".join(output_lines[-10:])
+        if detail:
+            raise RuntimeError(f"{script_name} exited with code {proc.returncode}\n{detail}")
         raise RuntimeError(f"{script_name} exited with code {proc.returncode}")
 
     # where each script actually writes its image output

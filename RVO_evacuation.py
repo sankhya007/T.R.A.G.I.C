@@ -24,6 +24,18 @@ from skimage.feature import peak_local_max
 
 np.random.seed(42)
 
+
+def zone_id_mask(labels_array, zid):
+    try:
+        target_id = int(zid) if np.issubdtype(labels_array.dtype, np.integer) else zid
+    except (TypeError, ValueError):
+        target_id = zid
+
+    mask = labels_array == target_id
+    if np.isscalar(mask) or getattr(mask, "ndim", 0) != labels_array.ndim:
+        return np.zeros(labels_array.shape, dtype=bool)
+    return mask
+
 # ══════════════════════════════════════════════════════════════════
 #  FLOW FIELD  — BFS from all exits outward over the walkable grid
 #  Each walkable cell stores the direction to step to get closer
@@ -303,7 +315,7 @@ def run(mask_path: str, config_path: str):
         if n <= 0:
             continue
         zid = zone["zone_id"]
-        zm  = (zone_labels == zid) & walkable
+        zm  = zone_id_mask(zone_labels, zid) & walkable
         zy, zx = np.where(zm)
         pool = list(zip(zx.tolist(), zy.tolist())) if len(zx) > 0 else global_pool
         for _ in range(n):

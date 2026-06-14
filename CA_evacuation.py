@@ -6,8 +6,10 @@ Movement   : CA rules (Moore neighbourhood, stochastic, speed-matched to SFM)
 
 import cv2
 import json
+import sys
 import numpy as np
 from collections import deque
+from pathlib import Path
 
 # ══════════════════════════════════════════════════════════════════════
 # CONFIG  — tweak everything here
@@ -39,6 +41,34 @@ DIRS  = [(0,-1),(0,1),(-1,0),(1,0), (-1,-1),(-1,1),(1,-1),(1,1)]
 DCOST = [  1.0,  1.0,  1.0,  1.0,    1.41,   1.41,  1.41,  1.41]
 
 np.random.seed(42)
+
+
+def zone_id_mask(labels_array, zid):
+    try:
+        target_id = int(zid) if np.issubdtype(labels_array.dtype, np.integer) else zid
+    except (TypeError, ValueError):
+        target_id = zid
+
+    mask = labels_array == target_id
+    if np.isscalar(mask) or getattr(mask, "ndim", 0) != labels_array.ndim:
+        return np.zeros(labels_array.shape, dtype=bool)
+    return mask
+
+
+def apply_runtime_args():
+    """Allow the launcher to provide the active mask, config, and UI params."""
+    if len(sys.argv) > 1:
+        CONFIG["mask_path"] = sys.argv[1]
+    if len(sys.argv) > 2:
+        CONFIG["config_path"] = sys.argv[2]
+    if len(sys.argv) > 3:
+        params_path = Path(sys.argv[3])
+        if params_path.exists():
+            with open(params_path, "r", encoding="utf-8") as f:
+                params = json.load(f)
+            for key, value in params.items():
+                if key in CONFIG:
+                    CONFIG[key] = value
 
 
 def load_mask(path):
@@ -97,7 +127,7 @@ def spawn_agents(cfg_data, walkable, walk_u8, cost, exit_zone, agent_wall_min):
     zone_pixels = {}
     for zdata in cfg_data["zones"]:
         zid    = zdata["zone_id"]
-        ys, xs = np.where(labels == zid)
+        ys, xs = np.where(zone_id_mask(labels, zid))
         valid  = (
             (dist_to_wall[ys, xs] > agent_wall_min) &
             (cost[ys, xs] >= 0) &
@@ -443,13 +473,14 @@ def print_report(analysis, exits_cfg, cfg):
     ]
 
     report = "\n".join(lines)
-    print("\n" + report)
+    print("\n" + report.encode("ascii", errors="replace").decode("ascii"))
     with open(cfg["out_report"], "w", encoding="utf-8") as f:
         f.write(report)
     print(f"\nSaved: {cfg['out_report']}")
 
 
 def main():
+    apply_runtime_args()
     C = CONFIG
     import os as _os; _os.makedirs("output", exist_ok=True)
     img, walkable, walk_u8, H, W = load_mask(C["mask_path"])
