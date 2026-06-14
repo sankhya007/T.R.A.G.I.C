@@ -66,7 +66,9 @@ pip install opencv-python numpy scipy scikit-image PyQt6
 ```
 
 Don't want to train the Model yourself? No problem here is the lin to download:
+```bash
 [Hugging Face Link](https://huggingface.co/sankhya007/Floorplan_parser_STITCH/tree/main)
+```
 
 ```bash
 python Tragic_launcher.py
