@@ -188,7 +188,7 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg):
             pos     = np.array([float(x), float(y)], dtype=np.float32)
             dists   = np.linalg.norm(exit_pts - pos, axis=1)
             nearest = int(np.argmin(dists))
-            if dists[nearest] < exit_radius:
+            if dists[nearest] < exit_radius or exit_zone[y, x]:
                 agent["evacuated"] = True
                 agent["time"]      = sim_time
                 agent["exit_used"] = nearest
@@ -266,7 +266,7 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg):
                 pos2   = np.array([float(cur_x), float(cur_y)], dtype=np.float32)
                 dists2 = np.linalg.norm(exit_pts - pos2, axis=1)
                 n2     = int(np.argmin(dists2))
-                if dists2[n2] < exit_radius:
+                if dists2[n2] < exit_radius or exit_zone[cur_y, cur_x]:
                     agent["evacuated"] = True
                     agent["time"]      = sim_time
                     agent["exit_used"] = n2
