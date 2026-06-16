@@ -42,6 +42,7 @@ class AppState:
     zone_config_path: str = ""   # output of View 2
     selected_model: str = "SFM"
     output_image_path: str = ""  # output of View 3
+    hazard: dict = field(default_factory=dict)  # optional hazard position: {"x":int,"y":int}
 
 
 # ══════════════════════════════════════════════════════════
@@ -803,7 +804,9 @@ class View2_ZoneEditor(QWidget):
         self.highlight = None
         self.highlight_set = set()   # multi-zone selection (shift-click)
         self.exits = []   # list of {"x": int, "y": int}
+        self.hazard = None   # single hazard: {"x": int, "y": int} or None
         self.exit_mode = False
+        self.hazard_mode = False
         self._build_ui()
 
     def _build_ui(self):
@@ -813,10 +816,10 @@ class View2_ZoneEditor(QWidget):
 
         # ── Left panel ──────────────────────────────────
         left = QFrame(); left.setObjectName("card")
-        left.setFixedWidth(300)
+        left.setFixedWidth(250)
         lv = QVBoxLayout(left)
         lv.setContentsMargins(20, 20, 20, 20)
-        lv.setSpacing(10)
+        lv.setSpacing(12)
 
         title = QLabel("Zone Editor"); title.setObjectName("title")
         sub = QLabel("Segment walkable zones and assign agent density")
@@ -828,6 +831,10 @@ class View2_ZoneEditor(QWidget):
         self.load_mask_btn = QPushButton("Load Mask")
         self.load_mask_btn.clicked.connect(self._load_mask)
         lv.addWidget(self.load_mask_btn)
+
+        self.load_config_btn = QPushButton("Load Existing Config")
+        self.load_config_btn.clicked.connect(self._load_config)
+        lv.addWidget(self.load_config_btn)
 
         self.auto_load_label = QLabel("")
         self.auto_load_label.setStyleSheet(f"color: {DARK['success']}; font-size: 8pt;")
@@ -902,6 +909,25 @@ class View2_ZoneEditor(QWidget):
         clear_exits_btn.clicked.connect(self._clear_exits)
         lv.addWidget(clear_exits_btn)
 
+        # hazard placement block
+        lv.addWidget(self._sep())
+        lv.addWidget(self._section_label("HAZARD PLACEMENT"))
+
+        self.hazard_mode_btn = QPushButton("Place Hazard")
+        self.hazard_mode_btn.setCheckable(True)
+        self.hazard_mode_btn.setEnabled(False)
+        self.hazard_mode_btn.clicked.connect(self._toggle_hazard_mode)
+        lv.addWidget(self.hazard_mode_btn)
+
+        self.hazard_info_label = QLabel("No hazard placed yet.")
+        self.hazard_info_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
+        self.hazard_info_label.setWordWrap(True)
+        lv.addWidget(self.hazard_info_label)
+
+        clear_hazard_btn = QPushButton("Clear Hazard")
+        clear_hazard_btn.clicked.connect(self._clear_hazard)
+        lv.addWidget(clear_hazard_btn)
+
         lv.addWidget(self._sep())
         lv.addWidget(self._section_label("SAVE CONFIG"))
 
@@ -942,7 +968,9 @@ class View2_ZoneEditor(QWidget):
         map_header.addWidget(self.zone_count_label)
         rv.addLayout(map_header)
 
-        self.map_label = QLabel()
+        # Create a custom map widget that supports hazard mode
+        from zone_detector import ZoneMapWidget as ZoneMapWidgetClass
+        self.map_label = ZoneMapWidgetClass()
         self.map_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.map_label.setStyleSheet(f"""
             background: {DARK['input_bg']};
@@ -957,7 +985,32 @@ class View2_ZoneEditor(QWidget):
         self.map_label.mousePressEvent = self._map_click
         rv.addWidget(self.map_label, 1)
 
-        root.addWidget(left)
+        # Wrap left panel in scroll area
+        scroll = QScrollArea()
+        scroll.setWidget(left)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(f"""
+            QScrollArea {{
+                background: transparent;
+                border: none;
+            }}
+            QScrollBar:vertical {{
+                background: {DARK['panel']};
+                width: 12px;
+                border-radius: 6px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {DARK['border']};
+                border-radius: 6px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {DARK['accent']};
+            }}
+        """)
+        
+        root.addWidget(scroll)
         root.addWidget(right, 1)
 
         # Toast
@@ -1042,12 +1095,63 @@ class View2_ZoneEditor(QWidget):
         # zone selection using mouse click 
         self._rebuild_zone_list()
         self.exit_mode_btn.setEnabled(True)
+        self.hazard_mode_btn.setEnabled(True)
         self.exits = []
+        self.hazard = None
+        self.exit_mode = False
+        self.hazard_mode = False
+        self.exit_mode_btn.setChecked(False)
+        self.hazard_mode_btn.setChecked(False)
         self._update_exit_info()
-        
-        self.exit_mode_btn.setEnabled(True)
-        self.exits = []
-        self._update_exit_info() # exit updates 
+        self._update_hazard_info() 
+
+    def _load_config(self):
+        """Load and edit existing zone config JSON."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Zone Config", "", "JSON Files (*.json)")
+        if path:
+            self._load_config_from_path(path)
+
+    def _load_config_from_path(self, path: str):
+        """Parse zone config JSON and populate UI state."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Error loading config", str(e))
+            return
+
+        # Validate that mask exists and load it
+        mask_path = config.get("mask_path")
+        if not mask_path or not Path(mask_path).exists():
+            QMessageBox.warning(self, "Mask not found",
+                f"Mask path not found: {mask_path}")
+            return
+
+        # Load the mask first
+        self._load_mask_from_path(mask_path)
+
+        # Now populate config data into the UI
+        self.base_spin.setValue(config.get("base_density", 1.0))
+        self.density_map = {}
+        for zone_data in config.get("zones", []):
+            zid = zone_data.get("zone_id")
+            d = zone_data.get("density_index", 1.0)
+            if zid in self.valid_zones:
+                self.density_map[zid] = d
+
+        self.exits = config.get("exits", [])
+        self.hazard = config.get("hazard", None)
+        self.state.zone_config_path = path
+        self.state.hazard = self.hazard if self.hazard else {}
+
+        self.hazard_mode_btn.setEnabled(True)
+        self._rebuild_zone_list()
+        self._update_exit_info()
+        self._update_hazard_info()
+        self._refresh_map()
+        self.auto_load_label.setText(f"✓ Loaded: {Path(path).name}")
+        self.proceed_btn.setEnabled(True)
 
     def _build_colors(self, zones):
         colors = {}
@@ -1094,6 +1198,14 @@ class View2_ZoneEditor(QWidget):
             cv2.putText(rgb, f"E{i+1}", (int(ex["x"]) - 12, int(ex["y"]) + 6),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
 
+        # Draw hazard
+        if self.hazard:
+            hx, hy = int(self.hazard["x"]), int(self.hazard["y"])
+            cv2.circle(rgb, (hx, hy), 18, (0, 0, 255), -1)  # red
+            cv2.circle(rgb, (hx, hy), 21, (0, 0, 200), 3)    # darker red border
+            cv2.putText(rgb, "H", (hx - 7, hy + 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
         qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
         lw = self.map_label.width() - 4
@@ -1116,6 +1228,11 @@ class View2_ZoneEditor(QWidget):
         py = int((event.position().y() - oy) * sy)
         px = np.clip(px, 0, self.labels.shape[1] - 1)
         py = np.clip(py, 0, self.labels.shape[0] - 1)
+
+        # HAZARD MODE — place or remove hazard
+        if self.hazard_mode:
+            self._map_hazard_click(px, py)
+            return
 
         # EXIT MODE — place or remove exits
         if self.exit_mode:
@@ -1213,11 +1330,14 @@ class View2_ZoneEditor(QWidget):
     def _toggle_exit_mode(self, checked):
         self.exit_mode = checked
         if checked:
+            self.hazard_mode = False
+            self.hazard_mode_btn.setChecked(False)
             self.exit_mode_btn.setText("Exit Mode ON (click map)")
             self.exit_mode_btn.setStyleSheet(f"background: {DARK['success']}; color: white; font-weight: bold;")
         else:
             self.exit_mode_btn.setText("Place Exits")
             self.exit_mode_btn.setStyleSheet("")
+        self._refresh_map()
 
     def _clear_exits(self):
         self.exits = []
@@ -1231,6 +1351,46 @@ class View2_ZoneEditor(QWidget):
         else:
             self.exit_info_label.setText(f"{n} exit(s) placed. Click near one to remove it.")
 
+    # ── Hazard mode ──────────────────────────────────────────────
+    def _toggle_hazard_mode(self, checked):
+        self.hazard_mode = checked
+        if checked:
+            self.exit_mode = False
+            self.exit_mode_btn.setChecked(False)
+            self.hazard_mode_btn.setText("Hazard Mode ON (click map)")
+            self.hazard_mode_btn.setStyleSheet(f"background: {DARK['danger']}; color: white; font-weight: bold;")
+        else:
+            self.hazard_mode_btn.setText("Place Hazard")
+            self.hazard_mode_btn.setStyleSheet("")
+        self._refresh_map()
+
+    def _map_hazard_click(self, orig_x: int, orig_y: int):
+        """Handle hazard placement/removal on map click."""
+        if self.hazard:
+            dist = ((self.hazard["x"] - orig_x) ** 2 + (self.hazard["y"] - orig_y) ** 2) ** 0.5
+            if dist <= 40:  # HAZARD_SNAP_DIST
+                self.hazard = None
+                self._update_hazard_info()
+                self._refresh_map()
+                return
+        self.hazard = {"x": orig_x, "y": orig_y}
+        self._update_hazard_info()
+        self._refresh_map()
+
+    def _clear_hazard(self):
+        if not self.hazard:
+            return
+        self.hazard = None
+        self._update_hazard_info()
+        self._refresh_map()
+
+    def _update_hazard_info(self):
+        if not self.hazard:
+            self.hazard_info_label.setText("No hazard placed yet.")
+        else:
+            h = self.hazard
+            self.hazard_info_label.setText(f"Hazard at ({h['x']}, {h['y']}). Click near to remove.")
+
     def _save_config(self):
         if not self.valid_zones:
             QMessageBox.warning(self, "No zones", "Load a mask and detect zones first.")
@@ -1242,28 +1402,46 @@ class View2_ZoneEditor(QWidget):
         if not path:
             return
 
+        def _normalize_json_value(val):
+            if isinstance(val, np.integer):
+                return int(val)
+            if isinstance(val, np.floating):
+                return float(val)
+            if isinstance(val, dict):
+                return {k: _normalize_json_value(v) for k, v in val.items()}
+            if isinstance(val, list):
+                return [_normalize_json_value(v) for v in val]
+            return val
+
         config = {
             "mask_path": self.state.mask_path,
-            "base_density": self.base_spin.value(),
+            "base_density": float(self.base_spin.value()),
             "agent_scale": 1000,
             "exits": self.exits,
+            "hazard": self.hazard,
             "zones": []
         }
         for i, zid in enumerate(self.valid_zones):
-            area = self.zone_stats[zid]
-            d = self.density_map.get(zid, 1.0)
-            agents = int(area * d * self.base_spin.value() / 1000)
+            area = int(self.zone_stats[zid])
+            d = float(self.density_map.get(zid, 1.0))
+            agents = int(area * d * float(self.base_spin.value()) / 1000)
             config["zones"].append({
-                "zone_index": i,
-                "zone_id": zid,
+                "zone_index": int(i),
+                "zone_id": int(zid),
                 "area_px": area,
                 "density_index": d,
                 "agents": agents,
             })
+        config = _normalize_json_value(config)
         with open(path, "w") as f:
             json.dump(config, f, indent=2)
 
+        # persist hazard into shared AppState for other views
         self.state.zone_config_path = path
+        try:
+            self.state.hazard = config.get("hazard", {})
+        except Exception:
+            self.state.hazard = {}
         total = sum(z["agents"] for z in config["zones"] if z["density_index"] > 0)
         short_name = Path(path).name
         self._toast.show_message(
@@ -1359,6 +1537,9 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
     with open(zone_config_path, "r", encoding="utf-8") as f:
         zone_config = json.load(f)
     zone_config["mask_path"] = str(runtime_mask)
+
+    # Ensure hazard is included in the config
+    zone_config["hazard"] = zone_config.get("hazard", None)
 
     for target in (runtime_zone_config, runtime_stitched_config):
         with open(target, "w", encoding="utf-8") as f:

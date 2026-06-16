@@ -23,6 +23,8 @@ AGENT_SCALE       = 1000
 
 EXIT_RADIUS       = 10    # px — radius of exit circle drawn on map
 EXIT_SNAP_DIST    = 30    # px — if click is within this of existing exit, remove it
+HAZARD_RADIUS     = 18    # px — radius of hazard circle (bigger than exits)
+HAZARD_SNAP_DIST  = 40    # px — if click is within this of hazard, remove it
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -75,7 +77,7 @@ def build_color_map(valid_zones):
 
 
 def render_zone_image(binary, labels, valid_zones, color_map,
-                      density_map, exits, highlight_id=None, exit_mode=False):
+                      density_map, exits, hazard=None, highlight_id=None, exit_mode=False):
     """
     Return an RGB QImage of the zone map with exit markers overlaid.
     exits: list of {"x": int, "y": int} in original pixel coords.
@@ -120,10 +122,17 @@ def render_zone_image(binary, labels, valid_zones, color_map,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 0, 0), 2, cv2.LINE_AA)
         cv2.putText(rgb, f"E{idx+1}", (px - 9, py + 5),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA)
-
     # Exit mode: green border around entire map as visual cue
     if exit_mode:
         cv2.rectangle(rgb, (2, 2), (w - 3, h - 3), (0, 220, 80), 4)
+
+    # Hazard: draw single hazard as red dot with black border and 'H' label
+    if hazard and isinstance(hazard, dict) and "x" in hazard and "y" in hazard:
+        hx, hy = int(hazard["x"]), int(hazard["y"])
+        cv2.circle(rgb, (hx, hy), HAZARD_RADIUS + 3, (0, 0, 0), -1)
+        cv2.circle(rgb, (hx, hy), HAZARD_RADIUS + 2, (0, 0, 255), -1)
+        cv2.putText(rgb, "H", (hx - 7, hy + 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
 
     h2, w2, ch = rgb.shape
     qimg = QImage(rgb.tobytes(), w2, h2, w2 * ch, QImage.Format.Format_RGB888)
@@ -143,7 +152,9 @@ class ZoneMapWidget(QLabel):
         self.scale_y     = 1.0
         self.on_click    = None   # callback(zone_id)          — zone mode
         self.on_exit_click = None # callback(orig_x, orig_y)   — exit mode
+        self.on_hazard_click = None # callback(orig_x, orig_y)   — hazard mode
         self.exit_mode   = False
+        self.hazard_mode = False
         self.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.setCursor(Qt.CursorShape.CrossCursor)
 
@@ -167,7 +178,9 @@ class ZoneMapWidget(QLabel):
         px = int(np.clip(px, 0, self.orig_w - 1))
         py = int(np.clip(py, 0, self.orig_h - 1))
 
-        if self.exit_mode and self.on_exit_click is not None:
+        if self.hazard_mode and self.on_hazard_click is not None:
+            self.on_hazard_click(px, py)
+        elif self.exit_mode and self.on_exit_click is not None:
             self.on_exit_click(px, py)
         elif not self.exit_mode and self.on_click is not None:
             zid = int(self.labels[py, px])
@@ -218,6 +231,8 @@ class ZoneEditor(QMainWindow):
         self.highlight   = None
         self.exits       = []        # list of {"x": int, "y": int}
         self.exit_mode   = False     # True = clicks place exits
+        self.hazard      = None      # single hazard: {"x":int, "y":int} or None
+        self.hazard_mode = False
 
         self._build_ui()
 
@@ -298,6 +313,28 @@ class ZoneEditor(QMainWindow):
         self.clear_exits_btn.setEnabled(False)
         lv.addWidget(self.clear_exits_btn)
 
+        # ── Hazard placement section ─────────────────────────────────
+        hazard_title = QLabel("Hazard Placement")
+        hazard_title.setStyleSheet("font-weight:bold; color:#ef4444;")
+        lv.addWidget(hazard_title)
+
+        self.hazard_mode_btn = QPushButton("⚠  Enter Hazard Mode")
+        self.hazard_mode_btn.setToolTip(
+            "Toggle Hazard Mode.\nLEFT CLICK on map → place hazard\nLEFT CLICK near existing hazard → remove it")
+        self.hazard_mode_btn.clicked.connect(self.toggle_hazard_mode)
+        self.hazard_mode_btn.setEnabled(False)
+        lv.addWidget(self.hazard_mode_btn)
+
+        self.hazard_info = QLabel("No hazard placed yet.")
+        self.hazard_info.setObjectName("info")
+        self.hazard_info.setWordWrap(True)
+        lv.addWidget(self.hazard_info)
+
+        self.clear_hazard_btn = QPushButton("✕  Clear Hazard")
+        self.clear_hazard_btn.clicked.connect(self.clear_hazard)
+        self.clear_hazard_btn.setEnabled(False)
+        lv.addWidget(self.clear_hazard_btn)
+
         lv.addWidget(self._sep())
 
         # ── Zone list ──
@@ -324,6 +361,7 @@ class ZoneEditor(QMainWindow):
         self.map_widget = ZoneMapWidget()
         self.map_widget.on_click       = self.zone_clicked
         self.map_widget.on_exit_click  = self.exit_clicked   # ← new
+        self.map_widget.on_hazard_click = self.hazard_clicked
         self.map_widget.setSizePolicy(QSizePolicy.Policy.Expanding,
                                        QSizePolicy.Policy.Expanding)
         map_scroll.setWidget(self.map_widget)
@@ -362,15 +400,21 @@ class ZoneEditor(QMainWindow):
         self.exits       = []
         self.exit_mode   = False
         self._set_exit_mode(False)
+        self.hazard      = None
+        self.hazard_mode = False
+        self._set_hazard_mode(False)
 
         self.exit_mode_btn.setEnabled(True)
         self.clear_exits_btn.setEnabled(True)
+        self.hazard_mode_btn.setEnabled(True)
+        self.clear_hazard_btn.setEnabled(True)
 
         self._refresh_map()
         self._rebuild_zone_list()
         self.zone_label.setText(
             f"{len(self.valid_zones)} zones detected.\nClick a zone to set its density.")
         self._update_exit_info()
+        self._update_hazard_info()
 
     def zone_clicked(self, zid):
         self.highlight = zid
@@ -468,6 +512,63 @@ class ZoneEditor(QMainWindow):
             self.exit_info.setText(f"{n} exits: {coords}{more}\n"
                                     "Click near any exit to remove it.")
 
+    # ── Hazard placement ─────────────────────────────────────────────
+    def toggle_hazard_mode(self):
+        self._set_hazard_mode(not self.hazard_mode)
+
+    def _set_hazard_mode(self, active: bool):
+        self.hazard_mode = active
+        self.map_widget.hazard_mode = active
+
+        if active:
+            self.hazard_mode_btn.setText("✅  Hazard Mode ON  (click to disable)")
+            self.hazard_mode_btn.setObjectName("exit_active")
+            self.apply_btn.setEnabled(False)
+            self.highlight = None
+        else:
+            self.hazard_mode_btn.setText("⚠  Enter Hazard Mode")
+            self.hazard_mode_btn.setObjectName("")
+
+        self.hazard_mode_btn.style().unpolish(self.hazard_mode_btn)
+        self.hazard_mode_btn.style().polish(self.hazard_mode_btn)
+        self._refresh_map()
+
+    def hazard_clicked(self, orig_x: int, orig_y: int):
+        """
+        Place or remove single hazard on map.
+        """
+        if self.hazard:
+            dist = ((self.hazard["x"] - orig_x) ** 2 + (self.hazard["y"] - orig_y) ** 2) ** 0.5
+            if dist <= HAZARD_SNAP_DIST:
+                self.hazard = None
+                self._update_hazard_info()
+                self._refresh_map()
+                return
+
+        # Place/replace hazard
+        self.hazard = {"x": orig_x, "y": orig_y}
+        self._update_hazard_info()
+        self._refresh_map()
+
+    def clear_hazard(self):
+        if not self.hazard:
+            return
+        reply = QMessageBox.question(
+            self, "Clear hazard",
+            "Remove the hazard?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.hazard = None
+            self._update_hazard_info()
+            self._refresh_map()
+
+    def _update_hazard_info(self):
+        if not self.hazard:
+            self.hazard_info.setText("No hazard placed yet.\nEnter Hazard Mode and click the map.")
+        else:
+            h = self.hazard
+            self.hazard_info.setText(f"Hazard at ({h['x']}, {h['y']}).\nClick near it to remove.")
+
     # ── Save ─────────────────────────────────────────────────────────
 
     def save_config(self):
@@ -495,6 +596,7 @@ class ZoneEditor(QMainWindow):
             "base_density": self.base_spin.value(),
             "agent_scale" : AGENT_SCALE,
             "exits"       : self.exits,
+            "hazard"      : self.hazard,
             "zones"       : []
         }
 
@@ -527,7 +629,7 @@ class ZoneEditor(QMainWindow):
         qimg = render_zone_image(
             self.binary, self.labels, self.valid_zones,
             self.color_map, self.density_map,
-            self.exits, self.highlight, self.exit_mode)
+            self.exits, self.hazard, self.highlight, self.exit_mode)
 
         pix = QPixmap.fromImage(qimg)
         max_w = self.width() - 320
