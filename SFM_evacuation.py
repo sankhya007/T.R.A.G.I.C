@@ -1,13 +1,15 @@
 import cv2
 import json
+import sys
 import numpy as np
 from collections import deque
+from pathlib import Path
 
 # ── CONFIG ──────────────────────────────────────────────────────────────
-MASK_PATH   = "stitched_mask.png"
-CONFIG_PATH = "zone_config.json"
-OUT_PATHS   = "output/sfm_agent_paths.png"
-OUT_REPORT  = "output/SFM_output_report.txt"
+MASK_PATH   = Path("stitched_mask.png")
+CONFIG_PATH = Path("zone_config.json")
+OUT_PATHS   = Path("output/sfm_agent_paths.png")
+OUT_REPORT  = Path("output/SFM_output_report.txt")
 
 DT       = 0.05
 MAX_TIME = 120
@@ -22,6 +24,21 @@ WA_RANGE        = 7.0
 EXIT_RADIUS     = 22
 STUCK_DIST      = 2
 STUCK_TICKS     = 20
+
+# for the fire spread 
+
+FIRE_SPREAD_SPEED     = 1.0   # multiplier on diffusion rate
+FIRE_INTENSITY_FACTOR = 1.0   # multiplier on growth-to-saturation rate
+FIRE_BLOCK_THRESHOLD  = 0.45  # intensity above which a cell is a hard wall (impassable)
+AGENT_VISION_RADIUS   = 60    # px — how far ahead an agent can "see" fire and react
+
+if len(sys.argv) > 1: MASK_PATH = sys.argv[1]
+if len(sys.argv) > 2: CONFIG_PATH = sys.argv[2]
+if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
+    with open(sys.argv[3]) as f:
+        _params = json.load(f)
+    FIRE_SPREAD_SPEED     = _params.get("fire_spread_speed", FIRE_SPREAD_SPEED)
+    FIRE_INTENSITY_FACTOR = _params.get("fire_intensity_factor", FIRE_INTENSITY_FACTOR)
 # ────────────────────────────────────────────────────────────────────────
 
 
@@ -45,53 +62,104 @@ wall_grad_y  /= wall_grad_mag
 # STEP 2 — BFS flow field
 # ═══════════════════════════════════════════════════════════════════════
 
+def build_flow_field(walk_mask, exits_list, h, w):
+    """BFS distance + flow direction toward nearest exit.
+    walk_mask should already have fire-blocked cells removed by the caller."""
+    cost   = np.full((h, w), -1, dtype=np.int32)
+    flow_x = np.zeros((h, w), dtype=np.float32)
+    flow_y = np.zeros((h, w), dtype=np.float32)
+    queue = deque()
+    for ex in exits_list:
+        ex_x, ex_y = int(ex["x"]), int(ex["y"])
+        for dy in range(-EXIT_RADIUS, EXIT_RADIUS + 1):
+            for dx in range(-EXIT_RADIUS, EXIT_RADIUS + 1):
+                nx, ny = ex_x + dx, ex_y + dy
+                if 0 <= nx < w and 0 <= ny < h and walk_mask[ny, nx] and cost[ny, nx] == -1:
+                    cost[ny, nx] = 0
+                    queue.append((nx, ny))
+    DIRS = [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
+    while queue:
+        cx, cy = queue.popleft()
+        for dx, dy in DIRS:
+            nx, ny = cx + dx, cy + dy
+            if 0 <= nx < w and 0 <= ny < h and walk_mask[ny, nx] and cost[ny, nx] == -1:
+                cost[ny, nx] = cost[cy, cx] + 1
+                queue.append((nx, ny))
+
+    # ── vectorized direction extraction (replaces the old per-pixel double loop) ──
+    # For each of the 8 neighbour offsets, shift the cost grid and keep whichever
+    # neighbour gives the lowest cost so far (same "steepest descent toward exit"
+    # rule as before, just done as 8 array ops instead of H*W*8 Python comparisons).
+    src = cost.astype(np.float32)
+    src[cost == -1] = np.inf
+    best_cost = src.copy()
+    bx = np.zeros((h, w), dtype=np.float32)
+    by = np.zeros((h, w), dtype=np.float32)
+
+    for dx, dy in DIRS:
+        shifted = np.full((h, w), np.inf, dtype=np.float32)
+        y0, y1 = max(0, -dy), h - max(0, dy)
+        x0, x1 = max(0, -dx), w - max(0, dx)
+        sy0, sy1 = max(0, dy), h - max(0, -dy)
+        sx0, sx1 = max(0, dx), w - max(0, -dx)
+        shifted[y0:y1, x0:x1] = src[sy0:sy1, sx0:sx1]
+
+        better = shifted < best_cost
+        best_cost = np.where(better, shifted, best_cost)
+        bx = np.where(better, float(dx), bx)
+        by = np.where(better, float(dy), by)
+
+    mag = np.sqrt(bx**2 + by**2)
+    valid = (cost >= 0) & (mag > 0)
+    flow_x[valid] = bx[valid] / mag[valid]
+    flow_y[valid] = by[valid] / mag[valid]
+
+    return cost, flow_x, flow_y
+
+
+def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
+    """Vectorized fire growth + 4-neighbour diffusion (replaces the per-burning-pixel
+    Python loop with shifted-array adds)."""
+    burning = intensity > 0.02
+    if not burning.any():
+        return intensity
+    growth_rate    = 0.15 * growth_mult
+    diffusion_rate = 0.12 * speed_mult * ticks_elapsed
+
+    intensity = intensity.copy()
+    intensity[burning] = np.minimum(1.0, intensity[burning] + growth_rate * ticks_elapsed)
+
+    push = intensity * diffusion_rate  # only meaningful where intensity > 0
+    new_intensity = intensity.copy()
+
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        shifted_push = np.zeros_like(push)
+        y0, y1 = max(0, dy), intensity.shape[0] - max(0, -dy)
+        x0, x1 = max(0, dx), intensity.shape[1] - max(0, -dx)
+        sy0, sy1 = max(0, -dy), intensity.shape[0] - max(0, dy)
+        sx0, sx1 = max(0, -dx), intensity.shape[1] - max(0, dx)
+        shifted_push[y0:y1, x0:x1] = push[sy0:sy1, sx0:sx1]
+        new_intensity = np.where(walk_mask, np.minimum(1.0, new_intensity + shifted_push), new_intensity)
+
+    return new_intensity
+
+
 with open(CONFIG_PATH) as f:
     cfg = json.load(f)
 
 exits = cfg["exits"]
+hazard_cfg = cfg.get("hazard")
 
-cost   = np.full((H, W), -1, dtype=np.int32)
-flow_x = np.zeros((H, W), dtype=np.float32)
-flow_y = np.zeros((H, W), dtype=np.float32)
-
-queue = deque()
-for ex in exits:
-    ex_x, ex_y = int(ex["x"]), int(ex["y"])
-    for dy in range(-EXIT_RADIUS, EXIT_RADIUS + 1):
-        for dx in range(-EXIT_RADIUS, EXIT_RADIUS + 1):
-            nx, ny = ex_x + dx, ex_y + dy
-            if 0 <= nx < W and 0 <= ny < H and walkable[ny, nx] and cost[ny, nx] == -1:
-                cost[ny, nx] = 0
-                queue.append((nx, ny))
-
-DIRS = [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
-
-while queue:
-    cx, cy = queue.popleft()
-    for dx, dy in DIRS:
-        nx, ny = cx + dx, cy + dy
-        if 0 <= nx < W and 0 <= ny < H and walkable[ny, nx] and cost[ny, nx] == -1:
-            cost[ny, nx] = cost[cy, cx] + 1
-            queue.append((nx, ny))
-
-for y in range(H):
-    for x in range(W):
-        if not walkable[y, x] or cost[y, x] == -1:
-            continue
-        best = cost[y, x]
-        bx = by = 0.0
-        for dx, dy in DIRS:
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < W and 0 <= ny < H and 0 <= cost[ny, nx] < best:
-                best = cost[ny, nx]
-                bx, by = float(dx), float(dy)
-        mag = (bx**2 + by**2) ** 0.5
-        if mag > 0:
-            flow_x[y, x] = bx / mag
-            flow_y[y, x] = by / mag
-
+cost, flow_x, flow_y = build_flow_field(walkable, exits, H, W)
 print(f"Flow field built. Reachable cells: {(cost >= 0).sum()}")
 
+fire_intensity = np.zeros((H, W), dtype=np.float32)
+fire_grad_x = np.zeros((H, W), dtype=np.float32)
+fire_grad_y = np.zeros((H, W), dtype=np.float32)
+if hazard_cfg:
+    fx, fy = int(np.clip(hazard_cfg["x"], 0, W-1)), int(np.clip(hazard_cfg["y"], 0, H-1))
+    fire_intensity[fy, fx] = 1.0
+    print(f"Hazard ignited at ({fx},{fy})")
 
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 3 — Spawn agents
@@ -168,54 +236,95 @@ for step in range(total_steps):
     active   = [a for a in agents if not a["evacuated"]]
     if not active:
         break
+    
+    # ── Fire update + hard-wall vision-triggered reroute ──────────────────
+    needs_reroute = False
+    if hazard_cfg and step % 10 == 0:
+        fire_intensity = spread_fire(fire_intensity, walkable, DT * 10,
+                                      FIRE_SPREAD_SPEED, FIRE_INTENSITY_FACTOR)
+
+        # Fire above threshold = hard obstacle, not just a soft push.
+        fire_blocked = fire_intensity >= FIRE_BLOCK_THRESHOLD
+        new_safe_walkable = walkable & ~fire_blocked
+
+        # Vision check: did fire just newly block any cell within an active
+        # agent's vision radius? If so, that agent has "seen" the hazard and
+        # the shared route grid must be recalculated immediately rather than
+        # waiting on a fixed timer. This is cheap: it's a vectorized distance
+        # check against the (usually small) set of newly-blocked cells.
+        new_block_ys, new_block_xs = np.where(fire_blocked & ~globals().get("_prev_fire_blocked", np.zeros_like(fire_blocked)))
+        if len(new_block_ys) and active:
+            ax = np.array([a["x"] for a in active], dtype=np.float32)
+            ay = np.array([a["y"] for a in active], dtype=np.float32)
+            # distance from every active agent to every newly-blocked cell
+            dx_ = ax[:, None] - new_block_xs[None, :]
+            dy_ = ay[:, None] - new_block_ys[None, :]
+            d2  = dx_*dx_ + dy_*dy_
+            if (d2 <= AGENT_VISION_RADIUS**2).any():
+                needs_reroute = True
+        _prev_fire_blocked = fire_blocked.copy()
+
+        if needs_reroute and new_safe_walkable.any():
+            cost, flow_x, flow_y = build_flow_field(new_safe_walkable, exits, H, W)
+
+        # Keep a soft repulsion gradient too (helps agents curve away smoothly
+        # from the hard wall instead of just bumping into the BFS-blocked edge).
+        gy, gx = np.gradient(fire_intensity)
+        fire_grad_x, fire_grad_y = -gx, -gy
+
+    # ── Vectorized agent state pull ────────────────────────────────────────
+    n = len(active)
+    pos = np.array([[a["x"], a["y"]] for a in active], dtype=np.float64)
+    vel = np.array([[a["vx"], a["vy"]] for a in active], dtype=np.float64)
+    ix  = np.clip(pos[:, 0], 0, W - 1).astype(np.int32)
+    iy  = np.clip(pos[:, 1], 0, H - 1).astype(np.int32)
+
+    # Force 1: Driving (toward exit via flow field, random heading if stuck/unset)
+    ex_dir = np.stack([flow_x[iy, ix], flow_y[iy, ix]], axis=1)
+    no_dir = (ex_dir[:, 0] == 0) & (ex_dir[:, 1] == 0)
+    if no_dir.any():
+        rand_a = np.random.uniform(0, 2*np.pi, size=no_dir.sum())
+        ex_dir[no_dir, 0] = np.cos(rand_a)
+        ex_dir[no_dir, 1] = np.sin(rand_a)
+    f_drive = (DESIRED_SPEED * ex_dir - vel) / RELAXATION_TIME
+
+    # Force 2: Agent-agent repulsion — vectorized pairwise computation
+    # (replaces the old O(N^2) Python double loop with one NumPy pass).
+    diff  = pos[:, None, :] - pos[None, :, :]                  # (n, n, 2)
+    dist  = np.sqrt((diff**2).sum(axis=2))                     # (n, n)
+    np.fill_diagonal(dist, np.inf)
+    in_range = dist < AGENT_RADIUS * 6
+    safe_dist = np.where(dist < 1e-3, 1e-3, dist)
+    mag = AA_STRENGTH * np.exp((AGENT_RADIUS * 2 - safe_dist) / AA_RANGE)
+    mag = np.where(in_range, mag, 0.0)
+    f_agent = (mag[:, :, None] * diff / safe_dist[:, :, None]).sum(axis=1)
+
+    # Force 3: Wall repulsion
+    d = dist_to_wall[iy, ix]
+    wall_active = d < WA_RANGE * 2
+    wall_mag = WA_STRENGTH * np.exp(-d / WA_RANGE)
+    f_wall = np.stack([wall_grad_x[iy, ix], wall_grad_y[iy, ix]], axis=1) * (wall_mag * wall_active)[:, None]
+
+    # Force 4: Fire repulsion (soft push, complements the hard-wall reroute above)
+    local_risk = fire_intensity[iy, ix]
+    fire_active = local_risk > 0.05
+    fire_mag = 400.0 * local_risk
+    f_fire = np.stack([fire_grad_x[iy, ix], fire_grad_y[iy, ix]], axis=1) * (fire_mag * fire_active)[:, None]
+
+    vel = vel + (f_drive + f_agent + f_wall + f_fire) * DT
+    spd = np.linalg.norm(vel, axis=1)
+    over = spd > DESIRED_SPEED * 1.5
+    if over.any():
+        vel[over] *= (DESIRED_SPEED * 1.5 / spd[over])[:, None]
+
+    new_pos = np.clip(pos + vel * DT, [0, 0], [W - 1, H - 1])
 
     for i, agent in enumerate(active):
-        x, y   = agent["x"], agent["y"]
-        vx, vy = agent["vx"], agent["vy"]
-        ix = int(np.clip(x, 0, W - 1))
-        iy = int(np.clip(y, 0, H - 1))
+        x, y = pos[i]
+        vx, vy = vel[i]
+        nx_pos, ny_pos = new_pos[i]
 
-        # Force 1: Driving
-        ex_dir_x = flow_x[iy, ix]
-        ex_dir_y = flow_y[iy, ix]
-        if ex_dir_x == 0 and ex_dir_y == 0:
-            a = np.random.uniform(0, 2 * np.pi)
-            ex_dir_x, ex_dir_y = np.cos(a), np.sin(a)
-
-        f_drive_x = (DESIRED_SPEED * ex_dir_x - vx) / RELAXATION_TIME
-        f_drive_y = (DESIRED_SPEED * ex_dir_y - vy) / RELAXATION_TIME
-
-        # Force 2: Agent repulsion
-        f_agent_x = f_agent_y = 0.0
-        for j, other in enumerate(active):
-            if j == i:
-                continue
-            dx = x - other["x"]
-            dy = y - other["y"]
-            dist = (dx**2 + dy**2) ** 0.5
-            if dist < 1e-3 or dist >= AGENT_RADIUS * 6:
-                continue
-            mag = AA_STRENGTH * np.exp((AGENT_RADIUS * 2 - dist) / AA_RANGE)
-            f_agent_x += mag * dx / dist
-            f_agent_y += mag * dy / dist
-
-        # Force 3: Wall repulsion
-        d = dist_to_wall[iy, ix]
-        f_wall_x = f_wall_y = 0.0
-        if d < WA_RANGE * 2:
-            mag = WA_STRENGTH * np.exp(-d / WA_RANGE)
-            f_wall_x = mag * wall_grad_x[iy, ix]
-            f_wall_y = mag * wall_grad_y[iy, ix]
-
-        vx += (f_drive_x + f_agent_x + f_wall_x) * DT
-        vy += (f_drive_y + f_agent_y + f_wall_y) * DT
-
-        spd = (vx**2 + vy**2) ** 0.5
-        if spd > DESIRED_SPEED * 1.5:
-            vx *= DESIRED_SPEED * 1.5 / spd
-            vy *= DESIRED_SPEED * 1.5 / spd
-
-        # Stuck check
+        # Stuck check (kept per-agent: cheap, and mutates each agent's own buffer)
         buf = agent["stuck_buf"]
         buf.append((x, y))
         if len(buf) > STUCK_TICKS:
@@ -224,9 +333,8 @@ for step in range(total_steps):
                 a = np.random.uniform(0, 2 * np.pi)
                 vx = np.cos(a) * DESIRED_SPEED * 0.5
                 vy = np.sin(a) * DESIRED_SPEED * 0.5
-
-        nx_pos = np.clip(x + vx * DT, 0, W - 1)
-        ny_pos = np.clip(y + vy * DT, 0, H - 1)
+                nx_pos = np.clip(x + vx * DT, 0, W - 1)
+                ny_pos = np.clip(y + vy * DT, 0, H - 1)
 
         if   walkable[int(ny_pos), int(nx_pos)]: agent["x"], agent["y"] = nx_pos, ny_pos
         elif walkable[int(y),      int(nx_pos)]: agent["x"] = nx_pos;  vy *= 0.5
@@ -242,8 +350,8 @@ for step in range(total_steps):
         congestion_map[cell_y, cell_x] += DT   # seconds spent here
 
         # Exit check — record WHICH exit
-        pos   = np.array([agent["x"], agent["y"]])
-        dists = np.linalg.norm(exit_pts - pos, axis=1)
+        epos  = np.array([agent["x"], agent["y"]])
+        dists = np.linalg.norm(exit_pts - epos, axis=1)
         nearest_exit = int(np.argmin(dists))
         if dists[nearest_exit] < EXIT_RADIUS:
             agent["evacuated"] = True
@@ -402,6 +510,13 @@ if density_map.max() > 0:
     dn   = (density_map / density_map.max() * 255).astype(np.uint8)
     heat = cv2.applyColorMap(dn, cv2.COLORMAP_HOT)
     base = cv2.addWeighted(base, 0.45, heat * walkable.astype(np.uint8)[:,:,None], 0.55, 0)
+  
+# Hazard overlay  
+if hazard_cfg and fire_intensity.max() > 0:
+    fire_u8 = (np.clip(fire_intensity, 0, 1) * 255).astype(np.uint8)
+    fire_color = cv2.applyColorMap(fire_u8, cv2.COLORMAP_HOT)
+    fire_mask3 = (fire_intensity > 0.03).astype(np.uint8)[:, :, None]
+    base = np.where(fire_mask3 > 0, cv2.addWeighted(base, 0.4, fire_color, 0.6, 0), base)
 
 # Agent trails
 for agent in agents:

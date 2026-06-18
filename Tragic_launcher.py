@@ -1470,6 +1470,8 @@ MODEL_CONFIGS = {
             ("Wall Strength",     "wall_strength",     "float", 100, 5000, 2000, 100, 0, "Repulsion force magnitude from walls"),
             ("Panic Threshold",   "panic_threshold",   "float", 0.0, 1.0,  0.3,  0.05, 2, "Panic level at which agents start evacuating"),
             ("Max Sim Time (s)",  "max_time",          "float", 10,  600,  300,  10, 0, "Maximum simulation duration in seconds"),
+            ("Fire Spread Speed",     "fire_spread_speed",     "float", 0.1, 5.0, 1.0, 0.1, 1, "Diffusion rate multiplier"),
+            ("Fire Intensity Factor", "fire_intensity_factor", "float", 0.1, 5.0, 1.0, 0.1, 1, "Growth-to-saturation rate multiplier"),
         ]
     },
     "RVO": {
