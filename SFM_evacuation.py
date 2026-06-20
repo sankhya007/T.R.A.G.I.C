@@ -147,19 +147,30 @@ def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
 with open(CONFIG_PATH) as f:
     cfg = json.load(f)
 
+
 exits = cfg["exits"]
 hazard_cfg = cfg.get("hazard")
 
-cost, flow_x, flow_y = build_flow_field(walkable, exits, H, W)
-print(f"Flow field built. Reachable cells: {(cost >= 0).sum()}")
+HAZARD_BLOCK_RADIUS = 90  # px — permanently avoided zone, bump up if still not enough
 
+routing_walkable = walkable
+hazard_zone = np.zeros((H, W), dtype=bool)
 fire_intensity = np.zeros((H, W), dtype=np.float32)
 fire_grad_x = np.zeros((H, W), dtype=np.float32)
 fire_grad_y = np.zeros((H, W), dtype=np.float32)
+
 if hazard_cfg:
     fx, fy = int(np.clip(hazard_cfg["x"], 0, W-1)), int(np.clip(hazard_cfg["y"], 0, H-1))
     fire_intensity[fy, fx] = 1.0
     print(f"Hazard ignited at ({fx},{fy})")
+
+    yy, xx = np.ogrid[:H, :W]
+    hazard_zone = (xx - fx)**2 + (yy - fy)**2 <= HAZARD_BLOCK_RADIUS**2
+    routing_walkable = walkable & ~hazard_zone
+
+cost, flow_x, flow_y = build_flow_field(routing_walkable, exits, H, W)
+print(f"Flow field built. Reachable cells: {(cost >= 0).sum()}")
+base_cost, _, _ = build_flow_field(walkable, exits, H, W)
 
 # ═══════════════════════════════════════════════════════════════════════
 # STEP 3 — Spawn agents
@@ -193,7 +204,8 @@ zone_pixels = {}
 for zdata in cfg["zones"]:
     zid    = zdata["zone_id"]
     ys, xs = np.where(zone_id_mask(labels, zid))
-    valid  = (dist_to_wall[ys, xs] > AGENT_RADIUS) & (cost[ys, xs] >= 0)
+    # valid  = (dist_to_wall[ys, xs] > AGENT_RADIUS) & (cost[ys, xs] >= 0)
+    valid  = (dist_to_wall[ys, xs] > AGENT_RADIUS) & (base_cost[ys, xs] >= 0)
     if valid.any():
         zone_pixels[zid] = list(zip(xs[valid].tolist(), ys[valid].tolist()))
 
@@ -237,55 +249,42 @@ for step in range(total_steps):
     if not active:
         break
     
-    # ── Fire update + hard-wall vision-triggered reroute ──────────────────
-    needs_reroute = False
+    # ── Fire growth (visual spread + soft repulsion only). Routing around
+    #    the hazard is already permanently handled by hazard_zone, so no
+    #    expensive reroute/BFS needed here anymore. ──────────────────────
     if hazard_cfg and step % 10 == 0:
         fire_intensity = spread_fire(fire_intensity, walkable, DT * 10,
                                       FIRE_SPREAD_SPEED, FIRE_INTENSITY_FACTOR)
-
-        # Fire above threshold = hard obstacle, not just a soft push.
-        fire_blocked = fire_intensity >= FIRE_BLOCK_THRESHOLD
-        new_safe_walkable = walkable & ~fire_blocked
-
-        # Vision check: did fire just newly block any cell within an active
-        # agent's vision radius? If so, that agent has "seen" the hazard and
-        # the shared route grid must be recalculated immediately rather than
-        # waiting on a fixed timer. This is cheap: it's a vectorized distance
-        # check against the (usually small) set of newly-blocked cells.
-        new_block_ys, new_block_xs = np.where(fire_blocked & ~globals().get("_prev_fire_blocked", np.zeros_like(fire_blocked)))
-        if len(new_block_ys) and active:
-            ax = np.array([a["x"] for a in active], dtype=np.float32)
-            ay = np.array([a["y"] for a in active], dtype=np.float32)
-            # distance from every active agent to every newly-blocked cell
-            dx_ = ax[:, None] - new_block_xs[None, :]
-            dy_ = ay[:, None] - new_block_ys[None, :]
-            d2  = dx_*dx_ + dy_*dy_
-            if (d2 <= AGENT_VISION_RADIUS**2).any():
-                needs_reroute = True
-        _prev_fire_blocked = fire_blocked.copy()
-
-        if needs_reroute and new_safe_walkable.any():
-            cost, flow_x, flow_y = build_flow_field(new_safe_walkable, exits, H, W)
-
-        # Keep a soft repulsion gradient too (helps agents curve away smoothly
-        # from the hard wall instead of just bumping into the BFS-blocked edge).
         gy, gx = np.gradient(fire_intensity)
         fire_grad_x, fire_grad_y = -gx, -gy
-
+        
     # ── Vectorized agent state pull ────────────────────────────────────────
     n = len(active)
     pos = np.array([[a["x"], a["y"]] for a in active], dtype=np.float64)
     vel = np.array([[a["vx"], a["vy"]] for a in active], dtype=np.float64)
     ix  = np.clip(pos[:, 0], 0, W - 1).astype(np.int32)
     iy  = np.clip(pos[:, 1], 0, H - 1).astype(np.int32)
-
-    # Force 1: Driving (toward exit via flow field, random heading if stuck/unset)
+    
+    # Force 1: Driving (toward exit via flow field). If an agent has no flow
+    # vector, it's either inside the blocked hazard zone (push it straight
+    # out, away from the hazard center) or in some other unreachable pocket
+    # (random heading as before).
     ex_dir = np.stack([flow_x[iy, ix], flow_y[iy, ix]], axis=1)
     no_dir = (ex_dir[:, 0] == 0) & (ex_dir[:, 1] == 0)
     if no_dir.any():
-        rand_a = np.random.uniform(0, 2*np.pi, size=no_dir.sum())
-        ex_dir[no_dir, 0] = np.cos(rand_a)
-        ex_dir[no_dir, 1] = np.sin(rand_a)
+        in_hazard = hazard_zone[iy, ix] & no_dir if hazard_cfg else np.zeros_like(no_dir)
+
+        if in_hazard.any():
+            away = pos[in_hazard] - np.array([fx, fy], dtype=np.float64)
+            away_mag = np.linalg.norm(away, axis=1, keepdims=True)
+            away_mag[away_mag < 1e-6] = 1.0
+            ex_dir[in_hazard] = away / away_mag
+
+        stuck_other = no_dir & ~in_hazard
+        if stuck_other.any():
+            rand_a = np.random.uniform(0, 2*np.pi, size=stuck_other.sum())
+            ex_dir[stuck_other, 0] = np.cos(rand_a)
+            ex_dir[stuck_other, 1] = np.sin(rand_a)
     f_drive = (DESIRED_SPEED * ex_dir - vel) / RELAXATION_TIME
 
     # Force 2: Agent-agent repulsion — vectorized pairwise computation
