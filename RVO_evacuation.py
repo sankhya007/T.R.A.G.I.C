@@ -202,6 +202,37 @@ def wall_push(px, py, dist, gx, gy, push_range=6.0, strength=30.0):
 
 
 # ══════════════════════════════════════════════════════════════════
+#  FIRE SPREAD  (ported from SFM — same growth + 4-neighbour diffusion)
+# ══════════════════════════════════════════════════════════════════
+
+def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
+    """Vectorized fire growth + 4-neighbour diffusion. Starts from a seeded
+    pixel and bleeds outward through walkable cells only."""
+    burning = intensity > 0.02
+    if not burning.any():
+        return intensity
+    growth_rate    = 0.15 * growth_mult
+    diffusion_rate = 0.12 * speed_mult * ticks_elapsed
+
+    intensity = intensity.copy()
+    intensity[burning] = np.minimum(1.0, intensity[burning] + growth_rate * ticks_elapsed)
+
+    push = intensity * diffusion_rate
+    new_intensity = intensity.copy()
+
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        shifted_push = np.zeros_like(push)
+        y0, y1 = max(0, dy), intensity.shape[0] - max(0, -dy)
+        x0, x1 = max(0, dx), intensity.shape[1] - max(0, -dx)
+        sy0, sy1 = max(0, -dy), intensity.shape[0] - max(0, dy)
+        sx0, sx1 = max(0, -dx), intensity.shape[1] - max(0, dx)
+        shifted_push[y0:y1, x0:x1] = push[sy0:sy1, sx0:sx1]
+        new_intensity = np.where(walk_mask, np.minimum(1.0, new_intensity + shifted_push), new_intensity)
+
+    return new_intensity
+
+
+# ══════════════════════════════════════════════════════════════════
 #  ZONE SEGMENTATION
 # ══════════════════════════════════════════════════════════════════
 
@@ -225,7 +256,8 @@ def segment_zones(walkable_mask):
 class Agent:
     _ctr = 0
 
-    def __init__(self, x, y, exits_px, flow, dist_g, speed_px_s=30.0, radius=5.0):
+    def __init__(self, x, y, exits_px, flow, dist_g, speed_px_s=30.0, radius=5.0,
+                 hazard_zone=None, hazard_xy=None):
         Agent._ctr += 1
         self.id      = Agent._ctr
         self.pos     = np.array([x, y], dtype=float)
@@ -236,6 +268,8 @@ class Agent:
         self.flow    = flow       # shared reference
         self.dist_g  = dist_g    # for exit detection
         self.exits_px = exits_px
+        self.hazard_zone = hazard_zone   # bool grid, True = permanently blocked
+        self.hazard_xy   = hazard_xy     # np.array([x, y]) hazard center
         self.time = None
         self.exit_used = None
         self.trail   = [self.pos.copy()]
@@ -254,6 +288,14 @@ class Agent:
 
         direction = sample_flow(self.flow, self.pos[0], self.pos[1])
         if np.linalg.norm(direction) < 1e-9:
+            if self.hazard_zone is not None and self.hazard_xy is not None:
+                ix = int(np.clip(self.pos[0], 0, self.hazard_zone.shape[1] - 1))
+                iy = int(np.clip(self.pos[1], 0, self.hazard_zone.shape[0] - 1))
+                if self.hazard_zone[iy, ix]:
+                    away = self.pos - self.hazard_xy
+                    mag = np.linalg.norm(away)
+                    if mag > 1e-6:
+                        return (away / mag) * (speed or self.speed)
             # truly unreachable — shouldn't happen after fixes
             return np.zeros(2)
         return direction * (speed or self.speed)
@@ -273,7 +315,8 @@ class Agent:
 #  MAIN
 # ══════════════════════════════════════════════════════════════════
 
-def run(mask_path: str, config_path: str):
+def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
+        fire_intensity_factor: float = 1.0):
     # ── load mask ────────────────────────────────────────────────
     img      = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -290,10 +333,33 @@ def run(mask_path: str, config_path: str):
         raise ValueError("No exits in zone config.")
     print(f"Exits: {len(exits_px)}")
 
-    # ── build flow field (BFS from exits, wall-aware) ────────────
+    # ── hazard: carve a permanent no-go zone out of walkable, same as SFM ──
+    hazard_cfg = cfg.get("hazard")
+    HAZARD_BLOCK_RADIUS = 90
+    FIRE_SPREAD_SPEED     = fire_spread_speed
+    FIRE_INTENSITY_FACTOR = fire_intensity_factor
+    hazard_zone = np.zeros((H, W), dtype=bool)
+    fire_intensity = np.zeros((H, W), dtype=np.float32)
+    hazard_xy = None
+    routing_walkable = walkable
+
+    if hazard_cfg:
+        hx = int(np.clip(hazard_cfg["x"], 0, W - 1))
+        hy = int(np.clip(hazard_cfg["y"], 0, H - 1))
+        hazard_xy = np.array([hx, hy], dtype=np.float64)
+        print(f"Hazard at ({hx},{hy})")
+
+        yy, xx = np.ogrid[:H, :W]
+        hazard_zone = (xx - hx)**2 + (yy - hy)**2 <= HAZARD_BLOCK_RADIUS**2
+        routing_walkable = walkable & ~hazard_zone
+        fire_intensity[hy, hx] = 1.0   # seed — same as SFM's fire_intensity[fy, fx] = 1.0
+    else:
+        print("No hazard in config — running clean (no rerouting needed).")
+
+    # ── build flow field (BFS from exits, wall-aware + hazard-aware) ────
     print("Building flow field…")
     t0 = time.time()
-    flow, dist_g = build_flow_field(walkable, exits_px)
+    flow, dist_g = build_flow_field(routing_walkable, exits_px)
     print(f"  Done in {time.time()-t0:.2f}s")
 
     # ── distance transform for wall repulsion ────────────────────
@@ -321,7 +387,8 @@ def run(mask_path: str, config_path: str):
         for _ in range(n):
             idx = np.random.randint(len(pool))
             px, py = float(pool[idx][0]), float(pool[idx][1])
-            agents.append(Agent(px, py, exits_px, flow, dist_g))
+            agents.append(Agent(px, py, exits_px, flow, dist_g,
+                                 hazard_zone=hazard_zone, hazard_xy=hazard_xy))
 
     print(f"Spawned {len(agents)} agents")
 
@@ -345,6 +412,18 @@ def run(mask_path: str, config_path: str):
     for step in range(MAX_STEPS):
         if all(a.done for a in agents):
             break
+
+        # ── fire growth (visual only — routing already handled by hazard_zone) ──
+        # SFM updates every 0.5s of sim time (step%10 at its DT=0.05) for a
+        # 120s-long run. RVO's sim can run far longer than that while agents
+        # are still evacuating, so cap fire growth at the same 120s budget —
+        # otherwise it just keeps spreading well past where SFM would stop.
+        FIRE_TICK_INTERVAL = 0.5
+        FIRE_GROWTH_BUDGET = 120.0
+        sim_t = step * DT
+        if hazard_cfg and sim_t <= FIRE_GROWTH_BUDGET and abs(sim_t % FIRE_TICK_INTERVAL) < DT / 2:
+            fire_intensity = spread_fire(fire_intensity, walkable, FIRE_TICK_INTERVAL,
+                                          FIRE_SPREAD_SPEED, FIRE_INTENSITY_FACTOR)
 
         # spatial bucket
         bucket = defaultdict(list)
@@ -455,7 +534,8 @@ def run(mask_path: str, config_path: str):
           f"evacuated={done_n}/{len(agents)} ({100*done_n//max(len(agents),1)}%)")
 
     Path("output").mkdir(exist_ok=True)
-    _save_paths(agents, exits_px, walkable, W, H, done_n)
+    _save_paths(agents, exits_px, walkable, W, H, done_n,
+                fire_intensity=fire_intensity)
     _save_heatmap(density_acc, density_frames, walkable, exits_px, W, H)
     _save_csv(ts_time, ts_active, ts_evac)
     _save_report(agents, exits_px, density_acc, density_frames, walkable,
@@ -467,9 +547,16 @@ def run(mask_path: str, config_path: str):
 #  OUTPUT HELPERS
 # ══════════════════════════════════════════════════════════════════
 
-def _save_paths(agents, exits_px, walkable, W, H, done_n):
+def _save_paths(agents, exits_px, walkable, W, H, done_n, fire_intensity=None):
     base = np.zeros((H, W, 3), dtype=np.uint8)
     base[~walkable] = [60, 60, 60]
+
+    # Hazard overlay — identical treatment to SFM's COLORMAP_HOT blend
+    if fire_intensity is not None and fire_intensity.max() > 0:
+        fire_u8 = (np.clip(fire_intensity, 0, 1) * 255).astype(np.uint8)
+        fire_color = cv2.applyColorMap(fire_u8, cv2.COLORMAP_HOT)
+        fire_mask3 = (fire_intensity > 0.03).astype(np.uint8)[:, :, None]
+        base = np.where(fire_mask3 > 0, cv2.addWeighted(base, 0.4, fire_color, 0.6, 0), base)
 
     GREEN  = (0, 200, 55)
     ORANGE = (0, 130, 255)
@@ -498,43 +585,7 @@ def _save_paths(agents, exits_px, walkable, W, H, done_n):
 
 
 def _save_heatmap(density_acc, n_frames, walkable, exits_px, W, H):
-    pass # might add later lol, for now fuck this shit
-    # avg = cv2.GaussianBlur(
-    #     (density_acc / max(n_frames, 1)).astype(np.float32), (21, 21), 0)
-
-    # fig, ax = plt.subplots(figsize=(12, 12*H/W), dpi=130)
-    # fig.patch.set_facecolor("#000000")
-    # ax.set_facecolor("#000000")
-    # ax.set_xlim(0, W); ax.set_ylim(H, 0)
-    # ax.set_aspect("equal"); ax.axis("off")
-
-    # wall_img = np.zeros((H, W, 3), dtype=np.uint8)
-    # wall_img[~walkable] = [40, 40, 40]
-    # ax.imshow(wall_img, origin="upper", zorder=1, alpha=0.6)
-    # hm = ax.imshow(avg, cmap="hot", origin="upper",
-    #                interpolation="bilinear",
-    #                vmin=0, vmax=avg.max()*0.8,
-    #                zorder=2, alpha=0.85)
-
-    # for e in exits_px:
-    #     ax.add_patch(plt.Circle((e["x"], e["y"]), 14,
-    #                             fill=False, edgecolor="#00ff88",
-    #                             linewidth=1.5, zorder=5))
-
-    # ax.set_title("Crowd Density Heatmap  —  RVO Evacuation",
-    #              color="white", fontsize=12, pad=8)
-    # cbar = plt.colorbar(hm, ax=ax, fraction=0.03, pad=0.01)
-    # cbar.set_label("Avg agents/px", color="white", fontsize=9)
-    # cbar.ax.yaxis.set_tick_params(color="white")
-    # plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
-
-    # plt.tight_layout()
-    # out = "output/rvo_density_heatmap.png"
-    # plt.savefig(out, dpi=130, bbox_inches="tight",
-    #             facecolor="black", edgecolor="none")
-    # plt.close()
-    # print(f"Saved {out}")
-
+    pass # no need lol fuck this - im not doing this 
 
 def _save_csv(ts_time, ts_active, ts_evac):
     import csv
@@ -694,6 +745,17 @@ def _save_report(agents, exits_px, density_acc, n_frames, walkable,
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print("Usage: python rvo_evacuation.py <mask.png> <zone_config.json>")
+        print("Usage: python rvo_evacuation.py <mask.png> <zone_config.json> [params.json]")
         sys.exit(1)
-    run(sys.argv[1], sys.argv[2])
+
+    _fire_spread_speed = 1.0
+    _fire_intensity_factor = 1.0
+    if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
+        with open(sys.argv[3]) as f:
+            _params = json.load(f)
+        _fire_spread_speed     = _params.get("fire_spread_speed", _fire_spread_speed)
+        _fire_intensity_factor = _params.get("fire_intensity_factor", _fire_intensity_factor)
+
+    run(sys.argv[1], sys.argv[2],
+        fire_spread_speed=_fire_spread_speed,
+        fire_intensity_factor=_fire_intensity_factor)
