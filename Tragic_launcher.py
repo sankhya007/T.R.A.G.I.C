@@ -29,6 +29,7 @@ from PyQt6.QtGui import (
     QFont, QWheelEvent, QTransform, QCursor,
 )
 
+HAZARD_BLOCK_RADIUS = 90  # px — must match the sim scripts' hazard_block_radius
 
 # ══════════════════════════════════════════════════════════
 #  SHARED STATE
@@ -1201,8 +1202,9 @@ class View2_ZoneEditor(QWidget):
         # Draw hazard
         if self.hazard:
             hx, hy = int(self.hazard["x"]), int(self.hazard["y"])
-            cv2.circle(rgb, (hx, hy), 18, (0, 0, 255), -1)  # red
-            cv2.circle(rgb, (hx, hy), 21, (0, 0, 200), 3)    # darker red border
+            cv2.circle(rgb, (hx, hy), HAZARD_BLOCK_RADIUS, (0, 140, 255), 2)  # actual no-go zone
+            cv2.circle(rgb, (hx, hy), 18, (0, 0, 255), -1)
+            cv2.circle(rgb, (hx, hy), 21, (0, 0, 200), 3)
             cv2.putText(rgb, "H", (hx - 7, hy + 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
