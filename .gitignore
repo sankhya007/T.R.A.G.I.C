@@ -37,3 +37,4 @@ assets/
 .env
 *.log
 *.csv
+*.txt
