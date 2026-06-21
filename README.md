@@ -43,7 +43,7 @@ The pipeline has three stages:
 
 **Stage 1 — Map Parser**: Tiles the input image with 50% overlap, runs each patch through the U-Net, Gaussian-blends predictions back, binarizes to `stitched_mask.png` (black = walkable, white = wall).
 
-**Stage 2 — Zone Editor**: Watershed segmentation splits walkable area into rooms/corridors. You click zones to set agent density and place exit markers. Saves to a JSON config.
+**Stage 2 — Zone Editor**: Watershed segmentation splits walkable area into rooms/corridors. You click zones to set agent density, place exit markers, and optionally drop a hazard. Saves to a JSON config.
 
 **Stage 3 — Simulation**: Launches one of the four simulation scripts as a subprocess, streams output to the UI, displays the result image and report.
 
@@ -114,7 +114,29 @@ A 5000px² room at density 1.0 with base 1.0 gets 5 agents. Set density to 0 to 
 
 ---
 
-### 3. Four Simulation Algorithms
+### 3. Hazard & Fire Spread
+
+Hazard Mode drops a single point hazard on the map, saved as `{"x": int, "y": int}` under `"hazard"` in the zone config. All four models read it the same way and split the response into two layers:
+
+- **Routing (permanent, hard)** — a fixed-radius circle around the hazard is carved out of the walkable mask *before* the flow field / BFS cost / potential field is built. Agents never path through it, full stop. No per-tick rerouting, no extra cost — it's baked into pathing once at setup.
+- **Fire (growing, soft)** — a separate `fire_intensity` field grows and diffuses outward through the real walkable area every simulation tick, purely for visuals and a soft repulsion nudge near the flame front. This is what you actually see spreading in the output PNG.
+
+If an agent somehow ends up stuck inside the hazard radius with nowhere lower-cost to go, it gets pushed straight away from the hazard center rather than freezing in place.
+
+Two runtime params control fire behavior, exposed as sliders in the launcher for SFM, RVO, Continuum, and CA alike:
+
+```python
+"fire_spread_speed":     1.0,   # multiplier on diffusion rate
+"fire_intensity_factor": 1.0,   # multiplier on growth-to-saturation rate
+```
+
+Bump either one up and the burning area visibly grows faster within the same sim duration — both flow through the existing `CONFIG`/`apply_runtime_args()` param pickup, so no per-model special-casing was needed.
+
+CA doesn't have a velocity field to push agents around with, so its version of fire repulsion is a tiebreak: among equally-good candidate cells, it picks the cooler one instead of adding a force vector.
+
+---
+
+### 4. Four Simulation Algorithms
 
 All four models take the same inputs and produce the same output structure: scored image with agent trails, exit utilization percentages, and bottleneck markers.
 
@@ -149,6 +171,15 @@ The launcher copies mask and zone config to hardcoded filenames in the project r
 
 **Agents spawn but zero evacuate**
 Either (a) exit markers landed on a wall pixel — place them clearly inside a corridor, or (b) you saved the zone config before placing any exits so the `"exits"` array in the JSON is empty. Open the JSON and check. Exit radius defaults to 22px; if exits are in tight spaces, increase it.
+
+**Hazard placed but nothing seems to route around it**
+Check the hazard didn't land in a spot where the carved-out radius swallows the only corridor to an exit — if there's no walkable path left, agents just sit at max BFS cost and never evacuate. Either move the hazard or widen the layout.
+
+---
+
+## Contributing
+
+Bug reports, feature requests, and PRs welcome — see `CONTRIBUTING.md` for the project layout and the patterns new code is expected to follow (SFM is the reference model, `output/` hygiene rules, that kind of thing). Issue and PR templates are under `.github/` if you want a starting point.
 
 ---
 
