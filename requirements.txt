@@ -7,3 +7,4 @@ numpy>=1.24.0         # arrays, flow fields, density maps
 scipy>=1.11.0         # ndimage, watershed distance transform
 scikit-image>=0.21.0  # peak_local_max, watershed segmentation
 PyQt6>=6.5.0          # GUI — launcher, zone editor, sim viewer
+pytest>=7.2.0          # testing framework
