@@ -11,7 +11,7 @@ __pycache__/
 *.onnx
 
 # Images & outputs
-*.png
+# *.png # to make sure the CI passes
 *.jpg
 *.jpeg
 *.bmp
@@ -22,7 +22,7 @@ __pycache__/
 
 # Data & configs (generated)
 *_zone_config.json
-zone_config.json
+# zone_config.json
 
 # Output directories
 output/
