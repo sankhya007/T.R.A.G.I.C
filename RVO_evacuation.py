@@ -316,7 +316,7 @@ class Agent:
 # ══════════════════════════════════════════════════════════════════
 
 def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
-        fire_intensity_factor: float = 1.0):
+        fire_intensity_factor: float = 1.0, max_time: float = 400.0):
     # ── load mask ────────────────────────────────────────────────
     img      = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
@@ -394,7 +394,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
 
     # ── sim constants ─────────────────────────────────────────────
     DT         = 0.1
-    MAX_STEPS  = 4000 
+    MAX_STEPS  = int(max_time / DT)
     TAU        = 2.0
     NEIGH_DIST = 60.0
     CELL_SZ    = 30.0
@@ -755,12 +755,15 @@ if __name__ == "__main__":
 
     _fire_spread_speed = 1.0
     _fire_intensity_factor = 1.0
+    _max_time = 400.0
     if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
         with open(sys.argv[3]) as f:
             _params = json.load(f)
         _fire_spread_speed     = _params.get("fire_spread_speed", _fire_spread_speed)
         _fire_intensity_factor = _params.get("fire_intensity_factor", _fire_intensity_factor)
+        _max_time              = _params.get("max_time", _max_time)
 
     run(sys.argv[1], sys.argv[2],
         fire_spread_speed=_fire_spread_speed,
-        fire_intensity_factor=_fire_intensity_factor)
+        fire_intensity_factor=_fire_intensity_factor,
+        max_time=_max_time)
