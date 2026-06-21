@@ -1505,6 +1505,8 @@ MODEL_CONFIGS = {
             ("Agent Radius",      "agent_radius",  "int",   2,    20,   6,     1,    0, "Agent body radius for repulsion"),
             ("Repulse Range",     "repulse_range", "float", 4,    40,   14,    1,    0, "Range in pixels of agent-agent repulsion"),
             ("Relax Time",        "relax_time",    "float", 0.1,  2.0,  0.3,   0.1,  1, "Velocity relaxation time constant"),
+            ("Fire Spread Speed",     "fire_spread_speed",     "float", 0.1, 5.0, 1.0, 0.1, 1, "Diffusion rate multiplier"),
+            ("Fire Intensity Factor", "fire_intensity_factor", "float", 0.1, 5.0, 1.0, 0.1, 1, "Growth-to-saturation rate multiplier"),
         ]
     },
     "CA": {
@@ -1519,6 +1521,8 @@ MODEL_CONFIGS = {
             ("Wall Clearance (px)",  "agent_wall_min", "int",   1,    30,   6,     1,    0, "Minimum spawn distance from walls"),
             ("Randomness",           "randomness",     "float", 0.0,  0.5,  0.06,  0.01, 2, "Amount of stochastic movement noise"),
             ("Exit Radius (px)",     "exit_radius",    "int",   5,    60,   22,    1,    0, "Distance from an exit counted as evacuated"),
+            ("Fire Spread Speed",     "fire_spread_speed",     "float", 0.1, 5.0, 1.0, 0.1, 1, "Diffusion rate multiplier"),
+            ("Fire Intensity Factor", "fire_intensity_factor", "float", 0.1, 5.0, 1.0, 0.1, 1, "Growth-to-saturation rate multiplier"),
         ]
     },
 }
