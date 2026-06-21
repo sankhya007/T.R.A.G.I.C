@@ -37,6 +37,11 @@ CFG = {
     "wall_color":   (85, 85, 85),
     "exit_color":   (0, 200, 220),
     "additive_scale": 8,
+
+    # fire spread — same meaning as in SFM/RVO
+    "fire_spread_speed":     1.0,   # multiplier on diffusion rate
+    "fire_intensity_factor": 1.0,   # multiplier on growth-to-saturation rate
+    "hazard_block_radius":   90,    # px — permanently avoided zone around hazard
 }
 
 
@@ -68,6 +73,34 @@ def zone_id_mask(labels_array, zid):
     return mask
 
 
+def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
+    """Vectorized fire growth + 4-neighbour diffusion — identical to SFM/RVO.
+    Visual + soft-push only; routing around the hazard is handled separately
+    and permanently via the hazard_zone carved into ContGrid.walkable."""
+    burning = intensity > 0.02
+    if not burning.any():
+        return intensity
+    growth_rate    = 0.15 * growth_mult
+    diffusion_rate = 0.12 * speed_mult * ticks_elapsed
+
+    intensity = intensity.copy()
+    intensity[burning] = np.minimum(1.0, intensity[burning] + growth_rate * ticks_elapsed)
+
+    push = intensity * diffusion_rate
+    new_intensity = intensity.copy()
+
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        shifted_push = np.zeros_like(push)
+        y0, y1 = max(0, dy), intensity.shape[0] - max(0, -dy)
+        x0, x1 = max(0, dx), intensity.shape[1] - max(0, -dx)
+        sy0, sy1 = max(0, -dy), intensity.shape[0] - max(0, dy)
+        sx0, sx1 = max(0, -dx), intensity.shape[1] - max(0, dx)
+        shifted_push[y0:y1, x0:x1] = push[sy0:sy1, sx0:sx1]
+        new_intensity = np.where(walk_mask, np.minimum(1.0, new_intensity + shifted_push), new_intensity)
+
+    return new_intensity
+
+
 class WalkMap:
     def __init__(self, path):
         img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
@@ -83,7 +116,7 @@ class WalkMap:
 
 
 class ContGrid:
-    def __init__(self, wm, exits_px, res):
+    def __init__(self, wm, exits_px, res, hazard_zone=None):
         self.res = res
         self.gw  = math.ceil(wm.w / res)
         self.gh  = math.ceil(wm.h / res)
@@ -95,6 +128,17 @@ class ContGrid:
                 px = min(int((gx + 0.5) * res), wm.w - 1)
                 py = min(int((gy + 0.5) * res), wm.h - 1)
                 self.walkable[gy, gx] = wm.walkable[py, px]
+
+        # hazard_zone is in full-res pixel coords — downsample the same way
+        # as the wall mask above, then carve it out of the routing grid.
+        # Same idea as SFM/RVO's "routing_walkable = walkable & ~hazard_zone".
+        if hazard_zone is not None:
+            for gy in range(self.gh):
+                for gx in range(self.gw):
+                    px = min(int((gx + 0.5) * res), wm.w - 1)
+                    py = min(int((gy + 0.5) * res), wm.h - 1)
+                    if hazard_zone[py, px]:
+                        self.walkable[gy, gx] = False
 
         self.exits = exits_px
         self.rho   = np.zeros((self.gh, self.gw), dtype=np.float32)
@@ -270,8 +314,24 @@ def main():
     exits_px = [(int(e["x"]), int(e["y"])) for e in exits_raw]
     print(f"  {len(exits_px)} exits")
 
+    # ── hazard: carve a permanent no-go zone ──────────
+    hazard_cfg = zcfg.get("hazard")
+    hazard_zone = np.zeros((wm.h, wm.w), dtype=bool)
+    fire_intensity = np.zeros((wm.h, wm.w), dtype=np.float32)
+    hazard_xy = None
+
+    if hazard_cfg:
+        hx = int(np.clip(hazard_cfg["x"], 0, wm.w - 1))
+        hy = int(np.clip(hazard_cfg["y"], 0, wm.h - 1))
+        hazard_xy = np.array([hx, hy], dtype=np.float64)
+        fire_intensity[hy, hx] = 1.0
+        print(f"Hazard ignited at ({hx},{hy})")
+
+        yy, xx = np.ogrid[:wm.h, :wm.w]
+        hazard_zone = (xx - hx)**2 + (yy - hy)**2 <= CFG["hazard_block_radius"]**2
+
     print("Building potential field...")
-    grid = ContGrid(wm, exits_px, CFG["grid_res"])
+    grid = ContGrid(wm, exits_px, CFG["grid_res"], hazard_zone=hazard_zone if hazard_cfg else None)
     grid.build_phi()
     print(f"  Reachable cells: {np.isfinite(grid.bfs).sum()}")
 
@@ -330,6 +390,8 @@ def main():
     exit_counts    = [0] * len(exits_px)
     last_print     = -5.0
     sim_time       = 0.0
+    fire_grad_x    = np.zeros((wm.h, wm.w), dtype=np.float32)
+    fire_grad_y    = np.zeros((wm.h, wm.w), dtype=np.float32)
 
     for step in range(MAX_STEPS):
         sim_time = step * DT
@@ -340,6 +402,15 @@ def main():
         if step % 30 == 0:
             grid.splat(agents)
             grid.build_phi()
+
+        # ── fire growth (visual + soft push only — routing around the
+        #    hazard is already permanently handled by hazard_zone in
+        #    ContGrid.walkable, same split as SFM/RVO) ──────────────────
+        if hazard_cfg and step % 10 == 0:
+            fire_intensity = spread_fire(fire_intensity, wm.walkable, DT * 10,
+                                          CFG["fire_spread_speed"], CFG["fire_intensity_factor"])
+            fgy, fgx = np.gradient(fire_intensity)
+            fire_grad_x, fire_grad_y = -fgx, -fgy
 
         bucket = {}
         for i, a in enumerate(active):
@@ -352,6 +423,19 @@ def main():
 
             gdx, gdy = grid.grad_at(ax, ay)
             gx_c, gy_c = grid.p2g(ax, ay)
+
+            # stuck with no direction → if inside the hazard zone, push
+            # straight out away from the hazard center (same fallback SFM
+            # uses for agents with no flow vector)
+            if gdx == 0.0 and gdy == 0.0 and hazard_xy is not None:
+                ix_h = int(np.clip(ax, 0, wm.w - 1))
+                iy_h = int(np.clip(ay, 0, wm.h - 1))
+                if hazard_zone[iy_h, ix_h]:
+                    away_x, away_y = ax - hazard_xy[0], ay - hazard_xy[1]
+                    away_mag = math.hypot(away_x, away_y)
+                    if away_mag > 1e-6:
+                        gdx, gdy = away_x / away_mag, away_y / away_mag
+
             f_desired  = grid._speed(gx_c, gy_c, gdx, gdy)
             vd_x = gdx * f_desired
             vd_y = gdy * f_desired
@@ -386,8 +470,16 @@ def main():
                 f_wall_x = mag * gx_map[iy_, ix_]
                 f_wall_y = mag * gy_map[iy_, ix_]
 
-            vx_new = ag["vx"] + (f_drive_x + f_rep_x + f_wall_x) * DT
-            vy_new = ag["vy"] + (f_drive_y + f_rep_y + f_wall_y) * DT
+            # fire repulsion — soft push, complements the hard hazard_zone reroute
+            local_risk = fire_intensity[iy_, ix_]
+            f_fire_x = f_fire_y = 0.0
+            if local_risk > 0.05:
+                fire_mag = 400.0 * local_risk
+                f_fire_x = fire_mag * fire_grad_x[iy_, ix_]
+                f_fire_y = fire_mag * fire_grad_y[iy_, ix_]
+
+            vx_new = ag["vx"] + (f_drive_x + f_rep_x + f_wall_x + f_fire_x) * DT
+            vy_new = ag["vy"] + (f_drive_y + f_rep_y + f_wall_y + f_fire_y) * DT
 
             spd = math.hypot(vx_new, vy_new)
             if spd > CFG["speed_px_s"] * 1.4:
@@ -556,6 +648,12 @@ def main():
         heat = cv2.applyColorMap(dn, cv2.COLORMAP_HOT)
         mask_f = wm.walkable.astype(np.uint8)[:, :, np.newaxis]
         out  = cv2.addWeighted(out, 0.55, heat * mask_f, 0.45, 0)
+
+    if hazard_cfg and fire_intensity.max() > 0:
+        fire_u8    = (np.clip(fire_intensity, 0, 1) * 255).astype(np.uint8)
+        fire_color = cv2.applyColorMap(fire_u8, cv2.COLORMAP_HOT)
+        fire_mask3 = (fire_intensity > 0.03).astype(np.uint8)[:, :, None]
+        out = np.where(fire_mask3 > 0, cv2.addWeighted(out, 0.4, fire_color, 0.6, 0), out)
 
     for a in agents:
         color = (0, 200, 55) if a["done"] else (0, 80, 200)
