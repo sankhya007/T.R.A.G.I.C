@@ -558,6 +558,8 @@ print(f"Saved: {OUT_PATHS}")
 # STEP 6 — Report
 # ═══════════════════════════════════════════════════════════════════════
 
+hazard_str = f"active @ ({fx},{fy}) r={HAZARD_BLOCK_RADIUS}px" if hazard_cfg else "none"
+
 lines = [
     "=" * 55,
     "       EVACUATION ANALYSIS REPORT",
@@ -568,6 +570,7 @@ lines = [
     f"  Total agents    : {total}",
     f"  Evacuated       : {evac_final}  ({100*rate:.1f}%)",
     f"  Trapped/timeout : {total - evac_final}  ({100*(1-rate):.1f}%)",
+    f"  Hazard          : {hazard_str}",
 ]
 
 if times:

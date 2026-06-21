@@ -539,7 +539,8 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     _save_heatmap(density_acc, density_frames, walkable, exits_px, W, H)
     _save_csv(ts_time, ts_active, ts_evac)
     _save_report(agents, exits_px, density_acc, density_frames, walkable,
-                 done_n, step + 1, DT, elapsed)
+                 done_n, step + 1, DT, elapsed,
+                 hazard_cfg=hazard_cfg, hazard_xy=hazard_xy, hazard_radius=HAZARD_BLOCK_RADIUS)
     print("Outputs saved in output/")
 
 
@@ -626,7 +627,8 @@ def _top_congestion_points(density_acc, n_frames, walkable, limit=5):
 
 
 def _save_report(agents, exits_px, density_acc, n_frames, walkable,
-                 done_n, step_count, dt, elapsed):
+                 done_n, step_count, dt, elapsed,
+                 hazard_cfg=None, hazard_xy=None, hazard_radius=90):
     out = "output/RVO_output_report.txt"
     total = len(agents)
     rate = done_n / max(total, 1)
@@ -675,6 +677,8 @@ def _save_report(agents, exits_px, density_acc, n_frames, walkable,
     else:
         recommendation = "Evacuation performance is acceptable for this RVO run."
 
+    hazard_str = f"active @ {tuple(int(v) for v in hazard_xy)} r={hazard_radius}px" if hazard_cfg else "none"
+
     lines = [
         "=" * 55,
         "       RVO EVACUATION ANALYSIS REPORT",
@@ -687,6 +691,7 @@ def _save_report(agents, exits_px, density_acc, n_frames, walkable,
         f"  Trapped/timeout : {total - done_n}  ({100 * (1 - rate):.1f}%)",
         f"  Sim time        : {sim_time:.1f}s",
         f"  Runtime         : {elapsed:.1f}s",
+        f"  Hazard          : {hazard_str}",
     ]
 
     if times:

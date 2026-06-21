@@ -500,7 +500,8 @@ def render_output(img, agents, density_map, exits_cfg, analysis, out_path, walka
 
 
 def print_report(analysis, exits_cfg, cfg):
-    r     = analysis
+    r = analysis
+    hazard_str = f"active @ {r['hazard_xy']} r={r['hazard_radius']}px" if r.get("hazard_active") else "none"
     lines = [
         "=" * 55,
         "       CA EVACUATION ANALYSIS REPORT",
@@ -509,6 +510,7 @@ def print_report(analysis, exits_cfg, cfg):
         f"  Total agents    : {r['total']}",
         f"  Evacuated       : {r['evac_final']}  ({100*r['rate']:.1f}%)",
         f"  Trapped/timeout : {r['total'] - r['evac_final']}  ({100*(1-r['rate']):.1f}%)",
+        f"  Hazard          : {hazard_str}",
     ]
     if r["times"]:
         lines += [
@@ -590,6 +592,9 @@ def main():
         hazard_zone=hazard_zone, hazard_xy=hazard_xy, fire_intensity=fire_intensity
     )
     analysis = analyse(agents, walkable, congestion_map, exits_cfg, evac_final, sim_time_final, C)
+    analysis["hazard_active"] = hazard_cfg is not None
+    analysis["hazard_xy"]     = hazard_xy
+    analysis["hazard_radius"] = C["hazard_block_radius"]
     render_output(img, agents, density_map, exits_cfg, analysis, C["out_image"], walkable,
                   fire_intensity=fire_intensity)
     print_report(analysis, exits_cfg, C)

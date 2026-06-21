@@ -14,6 +14,8 @@ repulsion term, neither of which exists in any of the four source papers.
 That layer is TRAGIC's own contribution sitting on top of the literature, and
 it is worth stating explicitly rather than leaving implicit.
 
+Note: the editor preview is static radius approximation by design
+
 ---
 
 ## 1. Social Force Model — `SFM_evacuation.py`

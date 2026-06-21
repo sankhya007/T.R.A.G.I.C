@@ -589,6 +589,9 @@ def main():
         "evac_time":       "Evacuation is too slow. Add an exit closer to the centre of the building.",
     }
 
+    hazard_str = (f"active @ {tuple(int(v) for v in hazard_xy)} r={CFG['hazard_block_radius']}px"
+                  if hazard_cfg else "none")
+
     sep = "=" * 55
     lines = [
         f"\n{sep}",
@@ -599,6 +602,7 @@ def main():
         f"  Total agents    : {total}",
         f"  Evacuated       : {evac_final}  ({100*rate:.1f}%)",
         f"  Trapped/timeout : {total - evac_final}  ({100*(1-rate):.1f}%)",
+        f"  Hazard          : {hazard_str}",
     ]
     if times:
         lines += [
