@@ -20,6 +20,12 @@ __pycache__/
 *.avi
 *.gif
 
+# build 
+build/
+dist/
+# *.spec this is secessary for github this contains the config recepies needed to build the project 
+
+
 # Data & configs (generated)
 *_zone_config.json
 # zone_config.json

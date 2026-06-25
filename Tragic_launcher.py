@@ -1567,6 +1567,12 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
         "continuum_evacuation_path.py": ["stitched_mask.png", "stitched_mask_zone_config.json", str(runtime_params)],
         "CA_evacuation.py": ["stitched_mask.png", "zone_config.json", str(runtime_params)],
     }
+    
+    def _resolve_runner(script_name):
+        if getattr(sys, "frozen", False):          # we're running as a compiled exe
+            exe_name = script_name.replace(".py", ".exe")
+            return [str(Path(sys.executable).parent / exe_name)]
+        return [sys.executable, script_name]       # normal dev mode
 
     proc = subprocess.Popen(
         [sys.executable, script_name] + script_args.get(script_name, []),
