@@ -23,7 +23,7 @@ __pycache__/
 # build 
 build/
 dist/
-# *.spec this is secessary for github this contains the config recepies needed to build the project 
+*.spec 
 
 
 # Data & configs (generated)

@@ -1575,7 +1575,7 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
         return [sys.executable, script_name]       # normal dev mode
 
     proc = subprocess.Popen(
-        [sys.executable, script_name] + script_args.get(script_name, []),
+        _resolve_runner(script_name) + script_args.get(script_name, []),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
