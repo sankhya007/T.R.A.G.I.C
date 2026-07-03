@@ -1,0 +1,20 @@
+services:
+  tragic:
+    # Build the image using the Dockerfile in the current directory.
+    build: .
+
+    # Mount your local "output" folder into the container.
+    # Left side  = folder on YOUR machine (created if it doesn't exist).
+    # Right side = path inside the container.
+    # This means simulation output files appear on your machine automatically.
+    volumes:
+      - ./output:/app/output
+      - ./stitched_mask.png:/app/stitched_mask.png
+      - ./zone_config.json:/app/zone_config.json
+
+    # Run SFM by default. Override this from the command line to run others.
+    # See README for examples.
+    command: >
+      python SFM_evacuation.py
+      stitched_mask.png
+      zone_config.json

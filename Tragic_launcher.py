@@ -724,7 +724,11 @@ class View1_MapParser(QWidget):
         self.progress_bar.setValue(0)
         self.status_label.setText("Starting...")
 
-        output = "stitched_mask.png"
+        #output = str(Path(self.state.image_path).parent / "stitched_mask.png")
+        # if you want to directly fetch the image from the parser view 1 to the parser view 2 then use the line up above 
+        output = str(Path(__file__).parent / "stitched_mask.png")
+        # this line will save the mask in the same directory as the script, so you can easily access it later and then the view 2 will load it from there.
+        
         self.state.mask_path = output
 
         self._worker = Worker(
@@ -750,9 +754,8 @@ class View1_MapParser(QWidget):
         if success:
             self.status_label.setText("✓ Mask generated successfully")
             self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
-            self.preview.load_image("stitched_mask.png")
-            # Show image dimensions
-            img = cv2.imread("stitched_mask.png", cv2.IMREAD_GRAYSCALE)
+            self.preview.load_image(self.state.mask_path)
+            img = cv2.imread(self.state.mask_path, cv2.IMREAD_GRAYSCALE)
             if img is not None:
                 white = np.sum(img > 127)
                 black = np.sum(img <= 127)
