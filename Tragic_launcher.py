@@ -253,9 +253,13 @@ class Worker(QThread):
 # ══════════════════════════════════════════════════════════
 
 class NavBar(QWidget):
+    # Emitted when the user clicks a step button; carries the target index
+    nav_clicked = pyqtSignal(int)
+
     def __init__(self):
         super().__init__()
         self.setFixedHeight(56)
+        self._max_visited = 0   # highest step index the user has reached
         self.setObjectName("navbar")
         self.setStyleSheet(f"""
             QWidget#navbar {{
@@ -273,23 +277,29 @@ class NavBar(QWidget):
 
         layout.addSpacing(40)
 
-        # Step indicators
+        # Step buttons — clickable to jump back to any visited step
         self.steps = []
         step_names = ["Map Parser", "Zone Editor", "Simulation"]
         for i, name in enumerate(step_names):
-            btn = QLabel(f"  {i+1}. {name}  ")
-            btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            btn = QPushButton(f"  {i+1}. {name}  ")
             btn.setFixedHeight(32)
+            btn.setEnabled(False)   # enabled only once the step has been visited
+            btn.setFlat(True)
             btn.setStyleSheet(f"""
-                color: {DARK['subtext']};
-                border-radius: 6px;
-                padding: 4px 12px;
-                font-size: 10pt;
+                QPushButton {{
+                    color: {DARK['subtext']};
+                    border: none;
+                    border-radius: 6px;
+                    padding: 4px 12px;
+                    font-size: 10pt;
+                    background: transparent;
+                }}
             """)
+            btn.clicked.connect(lambda checked, idx=i: self.nav_clicked.emit(idx))
             self.steps.append(btn)
             layout.addWidget(btn)
             if i < len(step_names) - 1:
-                arrow = QLabel("-")
+                arrow = QLabel(">")
                 arrow.setStyleSheet(f"color: {DARK['border']}; font-size: 12pt;")
                 layout.addWidget(arrow)
 
@@ -300,30 +310,56 @@ class NavBar(QWidget):
         layout.addWidget(info)
 
     def set_active(self, index: int):
+        # Track the furthest step reached so we know which buttons to enable
+        if index > self._max_visited:
+            self._max_visited = index
+
         for i, btn in enumerate(self.steps):
+            # Only enable steps the user has already been to
+            btn.setEnabled(i <= self._max_visited)
+
             if i == index:
+                # Current step — highlighted blue
                 btn.setStyleSheet(f"""
-                    color: white;
-                    background: {DARK['accent']};
-                    border-radius: 6px;
-                    padding: 4px 12px;
-                    font-weight: bold;
-                    font-size: 10pt;
+                    QPushButton {{
+                        color: white;
+                        background: {DARK['accent']};
+                        border: none;
+                        border-radius: 6px;
+                        padding: 4px 12px;
+                        font-weight: bold;
+                        font-size: 10pt;
+                    }}
                 """)
-            elif i < index:
+            elif i < self._max_visited:
+                # Previously visited step — green, clickable cursor
                 btn.setStyleSheet(f"""
-                    color: {DARK['success']};
-                    border-radius: 6px;
-                    padding: 4px 12px;
-                    font-size: 10pt;
+                    QPushButton {{
+                        color: {DARK['success']};
+                        background: transparent;
+                        border: none;
+                        border-radius: 6px;
+                        padding: 4px 12px;
+                        font-size: 10pt;
+                    }}
+                    QPushButton:hover {{
+                        background: {DARK['border']};
+                    }}
                 """)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
             else:
+                # Not yet visited — greyed out, not clickable
                 btn.setStyleSheet(f"""
-                    color: {DARK['subtext']};
-                    border-radius: 6px;
-                    padding: 4px 12px;
-                    font-size: 10pt;
+                    QPushButton {{
+                        color: {DARK['subtext']};
+                        background: transparent;
+                        border: none;
+                        border-radius: 6px;
+                        padding: 4px 12px;
+                        font-size: 10pt;
+                    }}
                 """)
+                btn.setCursor(Qt.CursorShape.ArrowCursor)
 
 
 # ══════════════════════════════════════════════════════════
@@ -975,7 +1011,17 @@ class View2_ZoneEditor(QWidget):
         lv.addStretch()
         lv.addWidget(self._sep())
 
-        self.proceed_btn = QPushButton("Proceed to Simulation")
+        # self.proceed_btn = QPushButton("Proceed to Simulation")
+        # self.proceed_btn.setObjectName("primary")
+        # self.proceed_btn.setEnabled(False)
+        # self.proceed_btn.clicked.connect(self.proceed_signal.emit)
+        # lv.addWidget(self.proceed_btn)
+        
+        back_btn2 = QPushButton("← Back to Parser")
+        back_btn2.clicked.connect(self._go_back)
+        lv.addWidget(back_btn2)
+
+        self.proceed_btn = QPushButton("Proceed to Simulation →")
         self.proceed_btn.setObjectName("primary")
         self.proceed_btn.setEnabled(False)
         self.proceed_btn.clicked.connect(self.proceed_signal.emit)
@@ -1075,6 +1121,10 @@ class View2_ZoneEditor(QWidget):
                 self._load_config_from_path(path)
             else:
                 self._load_mask_from_path(path)
+                
+    def _go_back(self):
+        # Navigate to the nav bar's step 0 via the main window
+        self.window()._go_to(0)
 
     def _load_mask_from_path(self, path: str):
         try:
@@ -1710,6 +1760,10 @@ class View3_Simulation(QWidget):
 
         lv.addStretch()
         lv.addWidget(self._sep())
+        
+        back_btn3 = QPushButton("← Back to Zones")
+        back_btn3.clicked.connect(lambda: self.window()._go_to(1))
+        lv.addWidget(back_btn3)
 
         self.status_label = QLabel("Configure and run a simulation")
         self.status_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
@@ -1932,10 +1986,44 @@ class View3_Simulation(QWidget):
                     f"Size: {img.shape[1]}×{img.shape[0]}px")
             self.save_img_btn.setEnabled(True)
             self.view_report_btn.setEnabled(Path("last_sim_report.txt").exists())
+        # else:
+        #     self.status_label.setText(f"{msg}")
+        #     self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
+        #     print(f"SIMULATION ERROR: {msg}")
+        
+        #error dialogue box updated
         else:
-            self.status_label.setText(f"{msg}")
+            self.status_label.setText("Simulation failed — see error dialog")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
             print(f"SIMULATION ERROR: {msg}")
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Simulation Error")
+            dlg.resize(640, 400)
+            dlg.setStyleSheet(f"background: {DARK['panel']}; color: {DARK['text']};")
+            dl = QVBoxLayout(dlg)
+            dl.setContentsMargins(16, 16, 16, 16)
+            tb = QTextEdit()
+            tb.setReadOnly(True)
+            tb.setPlainText(msg)
+            tb.setStyleSheet(f"""
+                QTextEdit {{
+                    background: {DARK['input_bg']};
+                    color: {DARK['danger']};
+                    border: 1px solid {DARK['border']};
+                    border-radius: 6px;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                    font-size: 9pt;
+                    padding: 8px;
+                }}
+            """)
+            dl.addWidget(tb)
+            close = QPushButton("Close")
+            close.setFixedWidth(80)
+            close.clicked.connect(dlg.accept)
+            row = QHBoxLayout()
+            row.addStretch(); row.addWidget(close)
+            dl.addLayout(row)
+            dlg.exec()
 
     def _save_image(self):
         if not self.state.output_image_path or not Path(self.state.output_image_path).exists():
@@ -2033,6 +2121,7 @@ class MainWindow(QMainWindow):
         # Wire proceed signals
         self.view1.proceed_signal.connect(lambda: self._go_to(1))
         self.view2.proceed_signal.connect(lambda: self._go_to(2))
+        self.nav.nav_clicked.connect(self._go_to)
 
         self._go_to(0)
 
