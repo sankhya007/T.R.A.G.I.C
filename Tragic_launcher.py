@@ -267,7 +267,7 @@ class NavBar(QWidget):
         layout.setContentsMargins(24, 0, 24, 0)
 
         # Logo
-        logo = QLabel("⚠ TRAGIC")
+        logo = QLabel("TRAGIC")
         logo.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {DARK['accent']}; letter-spacing: 2px;")
         layout.addWidget(logo)
 
@@ -289,7 +289,7 @@ class NavBar(QWidget):
             self.steps.append(btn)
             layout.addWidget(btn)
             if i < len(step_names) - 1:
-                arrow = QLabel("→")
+                arrow = QLabel("-")
                 arrow.setStyleSheet(f"color: {DARK['border']}; font-size: 12pt;")
                 layout.addWidget(arrow)
 
@@ -407,7 +407,7 @@ class ToastNotification(QFrame):
         """)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 8, 16, 8)
-        self.icon_label = QLabel("✓  Config Saved")
+        self.icon_label = QLabel("Config Saved")
         self.icon_label.setStyleSheet("font-weight: bold; font-size: 11pt;")
         self.msg_label = QLabel("")
         self.msg_label.setStyleSheet("font-size: 9pt;")
@@ -419,7 +419,7 @@ class ToastNotification(QFrame):
         self._timer.timeout.connect(self.hide)
 
     def show_message(self, title: str, detail: str):
-        self.icon_label.setText(f"✓  {title}")
+        self.icon_label.setText(f"{title}")
         self.msg_label.setText(detail)
         self._position()
         self.show()
@@ -643,11 +643,11 @@ class View1_MapParser(QWidget):
         lv.addWidget(self._sep())
 
         btn_row = QHBoxLayout()
-        self.tweak_btn = QPushButton("↺ Tweak Settings")
+        self.tweak_btn = QPushButton("Tweak Settings")
         self.tweak_btn.setVisible(False)
         self.tweak_btn.clicked.connect(self._tweak)
 
-        self.proceed_btn = QPushButton("Proceed to Zones →")
+        self.proceed_btn = QPushButton("Proceed to Zones")
         self.proceed_btn.setObjectName("success")
         self.proceed_btn.setObjectName("primary")
         self.proceed_btn.setVisible(False)
@@ -752,7 +752,7 @@ class View1_MapParser(QWidget):
         self.progress_bar.setVisible(False)
         self.run_btn.setEnabled(True)
         if success:
-            self.status_label.setText("✓ Mask generated successfully")
+            self.status_label.setText("Mask generated successfully")
             self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
             self.preview.load_image(self.state.mask_path)
             img = cv2.imread(self.state.mask_path, cv2.IMREAD_GRAYSCALE)
@@ -767,7 +767,7 @@ class View1_MapParser(QWidget):
             self.tweak_btn.setVisible(True)
             self.proceed_btn.setVisible(True)
         else:
-            self.status_label.setText(f"✗ Error: {msg}")
+            self.status_label.setText(f"Error: {msg}")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
 
     def _tweak(self):
@@ -942,7 +942,7 @@ class View2_ZoneEditor(QWidget):
         filename_row.addWidget(self.filename_input)
         lv.addLayout(filename_row)
 
-        self.save_btn = QPushButton("💾 Save Config")
+        self.save_btn = QPushButton("Save Config")
         self.save_btn.setObjectName("primary")
         self.save_btn.clicked.connect(self._save_config)
         lv.addWidget(self.save_btn)
@@ -950,7 +950,7 @@ class View2_ZoneEditor(QWidget):
         lv.addStretch()
         lv.addWidget(self._sep())
 
-        self.proceed_btn = QPushButton("Proceed to Simulation →")
+        self.proceed_btn = QPushButton("Proceed to Simulation")
         self.proceed_btn.setObjectName("primary")
         self.proceed_btn.setEnabled(False)
         self.proceed_btn.clicked.connect(self.proceed_signal.emit)
@@ -1039,13 +1039,17 @@ class View2_ZoneEditor(QWidget):
         """Called when this view becomes active. Auto-load if mask exists."""
         if self.binary is None and self.state.mask_path and Path(self.state.mask_path).exists():
             self._load_mask_from_path(self.state.mask_path)
-            self.auto_load_label.setText(f"✓ Auto-loaded: {Path(self.state.mask_path).name}")
+            self.auto_load_label.setText(f"Auto-loaded: {Path(self.state.mask_path).name}")
 
     def _load_mask(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Mask", "", "Images (*.png *.jpg *.bmp)")
+            self, "Select Mask or Config", "",
+            "All supported (*.png *.jpg *.bmp *.json);;Images (*.png *.jpg *.bmp);;JSON Config (*.json)")
         if path:
-            self._load_mask_from_path(path)
+            if path.endswith(".json"):
+                self._load_config_from_path(path)
+            else:
+                self._load_mask_from_path(path)
 
     def _load_mask_from_path(self, path: str):
         try:
@@ -1154,7 +1158,7 @@ class View2_ZoneEditor(QWidget):
         self._update_exit_info()
         self._update_hazard_info()
         self._refresh_map()
-        self.auto_load_label.setText(f"✓ Loaded: {Path(path).name}")
+        self.auto_load_label.setText(f"Loaded: {Path(path).name}")
         self.proceed_btn.setEnabled(True)
 
     def _build_colors(self, zones):
@@ -1281,7 +1285,7 @@ class View2_ZoneEditor(QWidget):
             self.zone_info.setText(
                 f"Zone {idx}  (id={self.highlight})\n"
                 f"Area: {area:,} px²\n"
-                f"Density: {d:.1f}  →  ~{agents} agents{multi_note}")
+                f"Density: {d:.1f}  ->  ~{agents} agents{multi_note}")
             self.zone_density_spin.setValue(d)
         self.apply_btn.setEnabled(bool(self.highlight_set))
         self._refresh_map()
@@ -1308,7 +1312,7 @@ class View2_ZoneEditor(QWidget):
         self.zone_info.setText(
             f"Zone {idx}  (id={zid})\n"
             f"Area: {area:,} px²\n"
-            f"Density: {d:.1f}  →  ~{agents} agents")
+            f"Density: {d:.1f}  ->  ~{agents} agents")
 
     def _rebuild_zone_list(self):
         while self.zone_list_layout.count():
@@ -1505,7 +1509,7 @@ MODEL_CONFIGS = {
             ("Time Step (DT)",    "DT",            "float", 0.01, 0.2,  0.05,  0.01, 2, "Simulation timestep in seconds"),
             ("Max Time (s)",      "MAX_TIME",      "float", 10,   200,  40,    10,   0, "Hard cap on simulation duration"),
             ("Speed (px/s)",      "speed_px_s",    "float", 10,   300,  150,   10,   0, "Agent movement speed in pixels per second"),
-            ("Grid Resolution",   "grid_res",      "int",   2,    8,    4,     1,    0, "Pixels per potential field cell. Higher = faster but less accurate"),
+            ("Grid Resolution",   "grid_res",      "int",   1,    8,    4,     1,    0, "Pixels per potential field cell. Higher = faster but less accurate"),
             ("Density Radius",    "density_radius","int",   2,    20,   6,     1,    0, "Pixel radius for agent density splatting"),
             ("Agent Radius",      "agent_radius",  "int",   2,    20,   6,     1,    0, "Agent body radius for repulsion"),
             ("Repulse Range",     "repulse_range", "float", 4,    40,   14,    1,    0, "Range in pixels of agent-agent repulsion"),
@@ -1647,6 +1651,7 @@ class View3_Simulation(QWidget):
         self.state = state
         self._worker: Optional[Worker] = None
         self._param_widgets = {}
+        self._saved_params = {}   # {model_key: {param_key: value}} — persists user edits
         self._build_ui()
 
     def _build_ui(self):
@@ -1729,7 +1734,7 @@ class View3_Simulation(QWidget):
         io_group.setLayout(io_layout)
         mv.addWidget(io_group)
 
-        self.run_btn = QPushButton("▶  Run Simulation")
+        self.run_btn = QPushButton("Run Simulation")
         self.run_btn.setObjectName("primary")
         self.run_btn.setEnabled(False)
         self.run_btn.clicked.connect(self._run)
@@ -1747,10 +1752,10 @@ class View3_Simulation(QWidget):
         self.fit_btn = QPushButton("Fit")
         self.fit_btn.setFixedWidth(50)
         self.fit_btn.clicked.connect(lambda: self.output_view.reset_zoom())
-        self.save_img_btn = QPushButton("💾 Save Image")
+        self.save_img_btn = QPushButton("Save Image")
         self.save_img_btn.setEnabled(False)
         self.save_img_btn.clicked.connect(self._save_image)
-        self.view_report_btn = QPushButton("📋 View Report")
+        self.view_report_btn = QPushButton("View Report")
         self.view_report_btn.setEnabled(False)
         self.view_report_btn.clicked.connect(self._view_report)
         output_header.addWidget(output_title)
@@ -1811,6 +1816,11 @@ class View3_Simulation(QWidget):
         self.config_title.setText(cfg["display"])
         self.config_desc.setText(cfg["desc"])
 
+        # Save current widget values before clearing (so switching models doesn't lose edits)
+        if self._param_widgets:
+            prev_key = self.state.selected_model  # still the old model at this point
+            self._saved_params[prev_key] = {k: w.value() for k, w in self._param_widgets.items()}
+
         # Clear old params
         while self.params_layout.count():
             item = self.params_layout.takeAt(0)
@@ -1818,17 +1828,21 @@ class View3_Simulation(QWidget):
                 item.widget().deleteLater()
         self._param_widgets.clear()
 
+        # Restore previously saved values for this model (or fall back to defaults)
+        saved = self._saved_params.get(key, {})
+
         # Build new param widgets
         for (label, key_p, typ, mn, mx, default, step, dec, tip) in cfg["params"]:
+            value = saved.get(key_p, default)   # use saved value if available
             if typ == "int":
                 w = QSpinBox()
                 w.setRange(int(mn), int(mx))
-                w.setValue(int(default))
+                w.setValue(int(value))
                 w.setSingleStep(int(step))
             else:
                 w = QDoubleSpinBox()
                 w.setRange(float(mn), float(mx))
-                w.setValue(float(default))
+                w.setValue(float(value))
                 w.setSingleStep(float(step))
                 w.setDecimals(int(dec))
             w.setToolTip(tip)
@@ -1854,6 +1868,7 @@ class View3_Simulation(QWidget):
             return
 
         params = {k: w.value() for k, w in self._param_widgets.items()}
+        self._saved_params[key] = params   # persist so re-selecting this model keeps the values
         output = cfg["output"]
         self.state.output_image_path = output
 
@@ -1882,7 +1897,7 @@ class View3_Simulation(QWidget):
         self.progress_bar.setVisible(False)
         self.run_btn.setEnabled(True)
         if success:
-            self.status_label.setText("✓ Simulation complete")
+            self.status_label.setText("Simulation complete")
             self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
             self.output_view.load_image(self.state.output_image_path)
             img = cv2.imread(self.state.output_image_path)
@@ -1893,7 +1908,7 @@ class View3_Simulation(QWidget):
             self.save_img_btn.setEnabled(True)
             self.view_report_btn.setEnabled(Path("last_sim_report.txt").exists())
         else:
-            self.status_label.setText(f"✗ {msg}")
+            self.status_label.setText(f"{msg}")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
             print(f"SIMULATION ERROR: {msg}")
 

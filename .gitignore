@@ -28,7 +28,7 @@ dist/
 
 # Data & configs (generated)
 *_zone_config.json
-# zone_config.json
+zone_config.json
 
 # Output directories
 output/
@@ -45,3 +45,4 @@ assets/
 *.log
 *.csv
 #*.txt
+last_sim_report.txt
