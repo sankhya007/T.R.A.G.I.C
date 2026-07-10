@@ -682,13 +682,28 @@ class View1_MapParser(QWidget):
         lv.addStretch()
         lv.addWidget(self._sep())
 
-        btn_row = QHBoxLayout()
-        self.tweak_btn = QPushButton("Tweak Settings")
-        self.tweak_btn.setVisible(False)
-        self.tweak_btn.clicked.connect(self._tweak)
+        # btn_row = QHBoxLayout()
+        # self.tweak_btn = QPushButton("Tweak Settings")
+        # self.tweak_btn.setVisible(False)
+        # self.tweak_btn.clicked.connect(self._tweak)
 
-        self.proceed_btn = QPushButton("Proceed to Zones")
-        self.proceed_btn.setObjectName("success")
+        # self.proceed_btn = QPushButton("Proceed to Zones")
+        # self.proceed_btn.setObjectName("success")
+        # self.proceed_btn.setObjectName("primary")
+        # self.proceed_btn.setVisible(False)
+        # self.proceed_btn.clicked.connect(self._proceed)
+
+        # btn_row.addWidget(self.tweak_btn)
+        # btn_row.addWidget(self.proceed_btn)
+        # lv.addLayout(btn_row)
+        
+        btn_row = QHBoxLayout()
+        self.tweak_btn = QPushButton("↺ Re-run")
+        self.tweak_btn.setToolTip("Adjust the parameters above and click this to run the parser again.")
+        self.tweak_btn.setVisible(False)
+        self.tweak_btn.clicked.connect(self._run)
+
+        self.proceed_btn = QPushButton("Proceed to Zones →")
         self.proceed_btn.setObjectName("primary")
         self.proceed_btn.setVisible(False)
         self.proceed_btn.clicked.connect(self._proceed)
@@ -810,12 +825,12 @@ class View1_MapParser(QWidget):
             self.status_label.setText(f"Error: {msg}")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
 
-    def _tweak(self):
-        # Stay on this view — just reset the action buttons so user can re-run
-        self.tweak_btn.setVisible(False)
-        self.proceed_btn.setVisible(False)
-        self.status_label.setText("Adjust parameters and run again.")
-        self.status_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
+    # def _tweak(self):
+    #     # Stay on this view — just reset the action buttons so user can re-run
+    #     self.tweak_btn.setVisible(False)
+    #     self.proceed_btn.setVisible(False)
+    #     self.status_label.setText("Adjust parameters and run again.")
+    #     self.status_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
 
     def _load_existing_mask(self):
         path, _ = QFileDialog.getOpenFileName(
