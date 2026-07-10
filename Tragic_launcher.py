@@ -585,6 +585,10 @@ class View1_MapParser(QWidget):
         file_row.addWidget(self.browse_btn)
         lv.addLayout(file_row)
 
+        self.load_mask_btn = QPushButton("Load Existing Mask")
+        self.load_mask_btn.clicked.connect(self._load_existing_mask)
+        lv.addWidget(self.load_mask_btn)
+
         lv.addWidget(self._sep())
         lv.addWidget(self._section_label("TILING PARAMETERS"))
 
@@ -776,6 +780,27 @@ class View1_MapParser(QWidget):
         self.proceed_btn.setVisible(False)
         self.status_label.setText("Adjust parameters and run again.")
         self.status_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
+
+    def _load_existing_mask(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Existing Mask", "", "Images (*.png *.jpg *.bmp)")
+        if not path:
+            return
+        self.state.mask_path = path
+        self.preview.load_image(path)
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is not None:
+            white = np.sum(img > 127)
+            black = np.sum(img <= 127)
+            total = img.size
+            self.preview_info.setText(
+                f"Size: {img.shape[1]}x{img.shape[0]}px  |  "
+                f"Walls: {100*white//total}%  |  Walkable: {100*black//total}%"
+            )
+        self.status_label.setText(f"Loaded: {Path(path).name}")
+        self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
+        self.tweak_btn.setVisible(False)
+        self.proceed_btn.setVisible(True)
 
     def _proceed(self):
         self.proceed_signal.emit()
