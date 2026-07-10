@@ -5,7 +5,7 @@ import numpy as np
 from collections import deque
 from pathlib import Path
 
-# ── CONFIG ──────────────────────────────────────────────────────────────
+#  CONFIG 
 MASK_PATH   = Path("stitched_mask.png")
 CONFIG_PATH = Path("zone_config.json")
 OUT_PATHS   = Path("output/sfm_agent_paths.png")
@@ -39,12 +39,12 @@ if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
         _params = json.load(f)
     FIRE_SPREAD_SPEED     = _params.get("fire_spread_speed", FIRE_SPREAD_SPEED)
     FIRE_INTENSITY_FACTOR = _params.get("fire_intensity_factor", FIRE_INTENSITY_FACTOR)
-# ────────────────────────────────────────────────────────────────────────
+# 
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # STEP 1 — Load mask
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 img          = cv2.imread(MASK_PATH, cv2.IMREAD_GRAYSCALE)
 H, W         = img.shape
@@ -58,9 +58,9 @@ wall_grad_x  /= wall_grad_mag
 wall_grad_y  /= wall_grad_mag
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # STEP 2 — BFS flow field
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 def build_flow_field(walk_mask, exits_list, h, w):
     """BFS distance + flow direction toward nearest exit.
@@ -86,7 +86,7 @@ def build_flow_field(walk_mask, exits_list, h, w):
                 cost[ny, nx] = cost[cy, cx] + 1
                 queue.append((nx, ny))
 
-    # ── vectorized direction extraction (replaces the old per-pixel double loop) ──
+    #  vectorized direction extraction (replaces the old per-pixel double loop) 
     # For each of the 8 neighbour offsets, shift the cost grid and keep whichever
     # neighbour gives the lowest cost so far (same "steepest descent toward exit"
     # rule as before, just done as 8 array ops instead of H*W*8 Python comparisons).
@@ -172,9 +172,9 @@ cost, flow_x, flow_y = build_flow_field(routing_walkable, exits, H, W)
 print(f"Flow field built. Reachable cells: {(cost >= 0).sum()}")
 base_cost, _, _ = build_flow_field(walkable, exits, H, W)
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # STEP 3 — Spawn agents
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 from scipy import ndimage as ndi
 from skimage.segmentation import watershed
@@ -230,9 +230,9 @@ for zdata in cfg["zones"]:
 print(f"Spawned {len(agents)} agents")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # STEP 4 — Simulation
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 exit_pts    = np.array([[e["x"], e["y"]] for e in exits], dtype=np.float32)
 density_map = np.zeros((H, W), dtype=np.float32)
@@ -249,16 +249,16 @@ for step in range(total_steps):
     if not active:
         break
     
-    # ── Fire growth (visual spread + soft repulsion only). Routing around
+    #  Fire growth (visual spread + soft repulsion only). Routing around
     #    the hazard is already permanently handled by hazard_zone, so no
-    #    expensive reroute/BFS needed here anymore. ──────────────────────
+    #    expensive reroute/BFS needed here anymore. 
     if hazard_cfg and step % 10 == 0:
         fire_intensity = spread_fire(fire_intensity, walkable, DT * 10,
                                       FIRE_SPREAD_SPEED, FIRE_INTENSITY_FACTOR)
         gy, gx = np.gradient(fire_intensity)
         fire_grad_x, fire_grad_y = -gx, -gy
         
-    # ── Vectorized agent state pull ────────────────────────────────────────
+    #  Vectorized agent state pull 
     n = len(active)
     pos = np.array([[a["x"], a["y"]] for a in active], dtype=np.float64)
     vel = np.array([[a["vx"], a["vy"]] for a in active], dtype=np.float64)
@@ -365,10 +365,10 @@ evac_final = sum(a["evacuated"] for a in agents)
 print(f"Done  t={sim_time:.1f}s  evacuated={evac_final}/{len(agents)}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # ANALYSIS 1 — Bottleneck scoring
 # Find high-congestion blobs, rank by total agent-seconds lost there
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 # Threshold: cells where congestion is in top 20%
 walkable_congestion = congestion_map[walkable]
@@ -407,9 +407,9 @@ bottlenecks.sort(key=lambda b: b["agent_seconds"], reverse=True)
 top_bottlenecks = bottlenecks[:5]
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # ANALYSIS 2 — Exit utilization
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 exit_counts = [0] * len(exits)
 for a in agents:
@@ -419,14 +419,14 @@ for a in agents:
 total_evacuated = sum(exit_counts)
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # ANALYSIS 3 — Score 0-100
 # Components:
 #   - Evacuation rate         (0-50 pts)
 #   - Mean evacuation time    (0-20 pts)  faster = better
 #   - Exit balance            (0-15 pts)  even distribution = better
 #   - Bottleneck severity     (0-15 pts)  less congestion = better
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 total  = len(agents)
 times  = [a["time"] for a in agents if a["evacuated"] and a["time"] is not None]
@@ -498,9 +498,9 @@ RECOMMENDATIONS = {
 recommendation = RECOMMENDATIONS[worst[0]]
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # STEP 5 — Output image
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 base = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
@@ -554,9 +554,9 @@ cv2.imwrite(OUT_PATHS, base)
 print(f"Saved: {OUT_PATHS}")
 
 
-# ═══════════════════════════════════════════════════════════════════════
+# 
 # STEP 6 — Report
-# ═══════════════════════════════════════════════════════════════════════
+# 
 
 hazard_str = f"active @ ({fx},{fy}) r={HAZARD_BLOCK_RADIUS}px" if hazard_cfg else "none"
 
@@ -588,8 +588,8 @@ lines += [
 ]
 for idx, ex in enumerate(exits):
     pct    = (exit_counts[idx] / total_evacuated * 100) if total_evacuated > 0 else 0
-    bar    = "█" * int(pct / 5)
-    status = "⚠ UNDERUSED" if pct < (100 / len(exits) * 0.4) else ""
+    bar    = "" * int(pct / 5)
+    status = " UNDERUSED" if pct < (100 / len(exits) * 0.4) else ""
     lines.append(f"  Exit {idx} ({int(ex['x'])},{int(ex['y'])}): {exit_counts[idx]:3d} agents  {pct:5.1f}%  {bar} {status}")
 
 lines += [

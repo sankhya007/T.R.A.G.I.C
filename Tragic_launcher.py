@@ -681,21 +681,6 @@ class View1_MapParser(QWidget):
 
         lv.addStretch()
         lv.addWidget(self._sep())
-
-        # btn_row = QHBoxLayout()
-        # self.tweak_btn = QPushButton("Tweak Settings")
-        # self.tweak_btn.setVisible(False)
-        # self.tweak_btn.clicked.connect(self._tweak)
-
-        # self.proceed_btn = QPushButton("Proceed to Zones")
-        # self.proceed_btn.setObjectName("success")
-        # self.proceed_btn.setObjectName("primary")
-        # self.proceed_btn.setVisible(False)
-        # self.proceed_btn.clicked.connect(self._proceed)
-
-        # btn_row.addWidget(self.tweak_btn)
-        # btn_row.addWidget(self.proceed_btn)
-        # lv.addLayout(btn_row)
         
         btn_row = QHBoxLayout()
         self.tweak_btn = QPushButton("↺ Re-run")
@@ -824,13 +809,6 @@ class View1_MapParser(QWidget):
         else:
             self.status_label.setText(f"Error: {msg}")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
-
-    # def _tweak(self):
-    #     # Stay on this view — just reset the action buttons so user can re-run
-    #     self.tweak_btn.setVisible(False)
-    #     self.proceed_btn.setVisible(False)
-    #     self.status_label.setText("Adjust parameters and run again.")
-    #     self.status_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
 
     def _load_existing_mask(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1031,12 +1009,6 @@ class View2_ZoneEditor(QWidget):
 
         lv.addStretch()
         lv.addWidget(self._sep())
-
-        # self.proceed_btn = QPushButton("Proceed to Simulation")
-        # self.proceed_btn.setObjectName("primary")
-        # self.proceed_btn.setEnabled(False)
-        # self.proceed_btn.clicked.connect(self.proceed_signal.emit)
-        # lv.addWidget(self.proceed_btn)
         
         back_btn2 = QPushButton("← Back to Parser")
         back_btn2.clicked.connect(self._go_back)
@@ -1845,12 +1817,6 @@ class View3_Simulation(QWidget):
         io_group.setLayout(io_layout)
         mv.addWidget(io_group)
 
-        # self.run_btn = QPushButton("Run Simulation")
-        # self.run_btn.setObjectName("primary")
-        # self.run_btn.setEnabled(False)
-        # self.run_btn.clicked.connect(self._run)
-        # mv.addWidget(self.run_btn)
-
         reset_btn = QPushButton("Reset to Defaults")
         reset_btn.setToolTip("Restore all parameters to their default values.")
         reset_btn.clicked.connect(self._reset_params)
@@ -2002,12 +1968,6 @@ class View3_Simulation(QWidget):
         self._saved_params[key] = params   # persist so re-selecting this model keeps the values
         output = cfg["output"]
         self.state.output_image_path = output
-
-        # self.run_btn.setEnabled(False)
-        # self.save_img_btn.setEnabled(False)
-        # self.progress_bar.setVisible(True)
-        # self.progress_bar.setValue(0)
-        # self.status_label.setText("Starting simulation...")
         
         self.run_btn.setEnabled(False)
         self.save_img_btn.setEnabled(False)
@@ -2048,10 +2008,6 @@ class View3_Simulation(QWidget):
                     f"Size: {img.shape[1]}×{img.shape[0]}px")
             self.save_img_btn.setEnabled(True)
             self.view_report_btn.setEnabled(Path("last_sim_report.txt").exists())
-        # else:
-        #     self.status_label.setText(f"{msg}")
-        #     self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
-        #     print(f"SIMULATION ERROR: {msg}")
         
         #error dialogue box updated
         else:

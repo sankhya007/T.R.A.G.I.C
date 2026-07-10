@@ -6,9 +6,9 @@ import numpy as np
 from collections import deque
 from pathlib import Path
 
-# ══════════════════════════════════════════════════════════════════════
+# 
 # CONFIG  — tweak everything here
-# ══════════════════════════════════════════════════════════════════════
+# 
 CONFIG = {
     "mask_path":    "stitched_mask.png",
     "config_path":  "zone_config.json",
@@ -223,9 +223,9 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg,
         if not active:
             break
 
-        # ── fire growth (visual + soft bias only — routing around the hazard
+        #  fire growth (visual + soft bias only — routing around the hazard
         #    is already permanently handled by hazard_zone baked into `cost`,
-        #    same split as SFM/RVO/Continuum) ──────────────────────────────
+        #    same split as SFM/RVO/Continuum) 
         if hazard_active and tick % FIRE_TICK_TICKS == 0:
             fire_intensity = spread_fire(fire_intensity, walkable, dt * FIRE_TICK_TICKS,
                                           FIRE_SPREAD_SPEED, FIRE_INTENSITY_FACTOR)
@@ -523,8 +523,8 @@ def print_report(analysis, exits_cfg, cfg):
     ideal_pct = 100.0 / max(len(exits_cfg), 1)
     for idx, ex in enumerate(exits_cfg):
         pct    = (r["exit_counts"][idx] / r["total_evacuated"] * 100) if r["total_evacuated"] > 0 else 0
-        bar    = "█" * int(pct / 5)
-        status = "⚠ UNDERUSED" if pct < ideal_pct * (cfg["exit_underuse_pct"] / 100.0) else ""
+        bar    = "" * int(pct / 5)
+        status = " UNDERUSED" if pct < ideal_pct * (cfg["exit_underuse_pct"] / 100.0) else ""
         lines.append(
             f"  Exit {idx} ({int(ex['x'])},{int(ex['y'])}): "
             f"{r['exit_counts'][idx]:3d} agents  {pct:5.1f}%  {bar} {status}"
@@ -566,7 +566,7 @@ def main():
         cfg_data = json.load(f)
     exits_cfg = cfg_data["exits"]
 
-    # ── hazard: carve a permanent no-go zone, same as SFM/RVO/Continuum ──
+    #  hazard: carve a permanent no-go zone, same as SFM/RVO/Continuum 
     hazard_cfg     = cfg_data.get("hazard")
     hazard_zone    = np.zeros((H, W), dtype=bool)
     fire_intensity = np.zeros((H, W), dtype=np.float32)

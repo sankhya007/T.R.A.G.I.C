@@ -27,11 +27,11 @@ def zone_id_mask(labels_array, zid):
         return np.zeros(labels_array.shape, dtype=bool)
     return mask
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  FLOW FIELD  — BFS from all exits outward over the walkable grid
 #  Each walkable cell stores the direction to step to get closer
 #  to the nearest exit via a wall-respecting shortest path.
-# ══════════════════════════════════════════════════════════════════
+# 
 
 FLOW_SCALE = 4   # compute on 1/4-resolution grid, bilinear lookup at runtime
 
@@ -124,9 +124,9 @@ def sample_flow(flow, px, py):
     return v / mag
 
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  ORCA CORE
-# ══════════════════════════════════════════════════════════════════
+# 
 
 def orca_halfplane(pos_a, vel_a, r_a, pos_b, vel_b, r_b, tau=2.0):
     rel_pos = pos_b - pos_a
@@ -178,9 +178,9 @@ def resolve_velocity(v_pref, halfplanes, max_speed):
     return v
 
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  WALL PUSH  (soft repulsion, prevents agents sitting on wall pixels)
-# ══════════════════════════════════════════════════════════════════
+# 
 
 def build_dist_transform(walkable_mask):
     walk_u8 = walkable_mask.astype(np.uint8) * 255
@@ -201,9 +201,9 @@ def wall_push(px, py, dist, gx, gy, push_range=6.0, strength=30.0):
     return np.array([gx[iy, ix] * factor, gy[iy, ix] * factor])
 
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  FIRE SPREAD  (ported from SFM — same growth + 4-neighbour diffusion)
-# ══════════════════════════════════════════════════════════════════
+# 
 
 def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
     """Vectorized fire growth + 4-neighbour diffusion. Starts from a seeded
@@ -232,9 +232,9 @@ def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
     return new_intensity
 
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  ZONE SEGMENTATION
-# ══════════════════════════════════════════════════════════════════
+# 
 
 def segment_zones(walkable_mask):
     binary = walkable_mask.astype(np.uint8) * 255
@@ -249,9 +249,9 @@ def segment_zones(walkable_mask):
     return watershed(-dist, markers, mask=binary)
 
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  AGENT
-# ══════════════════════════════════════════════════════════════════
+# 
 
 class Agent:
     _ctr = 0
@@ -311,13 +311,13 @@ class Agent:
         self._last_pos  = self.pos.copy()
 
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  MAIN
-# ══════════════════════════════════════════════════════════════════
+# 
 
 def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
         fire_intensity_factor: float = 1.0, max_time: float = 400.0):
-    # ── load mask ────────────────────────────────────────────────
+    #  load mask 
     img      = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(mask_path)
@@ -325,7 +325,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     H, W     = walkable.shape
     print(f"Mask: {W}×{H}  walkable={walkable.mean()*100:.1f}%")
 
-    # ── load config ──────────────────────────────────────────────
+    #  load config 
     with open(config_path) as f:
         cfg = json.load(f)
     exits_px = cfg.get("exits", [])
@@ -333,7 +333,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
         raise ValueError("No exits in zone config.")
     print(f"Exits: {len(exits_px)}")
 
-    # ── hazard: carve a permanent no-go zone out of walkable, same as SFM ──
+    #  hazard: carve a permanent no-go zone out of walkable, same as SFM 
     hazard_cfg = cfg.get("hazard")
     HAZARD_BLOCK_RADIUS = 90
     FIRE_SPREAD_SPEED     = fire_spread_speed
@@ -356,22 +356,22 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     else:
         print("No hazard in config — running clean (no rerouting needed).")
 
-    # ── build flow field (BFS from exits, wall-aware + hazard-aware) ────
+    #  build flow field (BFS from exits, wall-aware + hazard-aware) 
     print("Building flow field…")
     t0 = time.time()
     flow, dist_g = build_flow_field(routing_walkable, exits_px)
     print(f"  Done in {time.time()-t0:.2f}s")
 
-    # ── distance transform for wall repulsion ────────────────────
+    #  distance transform for wall repulsion 
     dist_map, gx_map, gy_map = build_dist_transform(walkable)
 
-    # ── zone segmentation for spawning ───────────────────────────
+    #  zone segmentation for spawning 
     print("Segmenting zones…")
     zone_labels = segment_zones(walkable)
     all_wy, all_wx = np.where(walkable)
     global_pool = list(zip(all_wx.tolist(), all_wy.tolist()))
 
-    # ── spawn agents ─────────────────────────────────────────────
+    #  spawn agents 
     Agent._ctr = 0
     agents = []
     for zone in cfg.get("zones", []):
@@ -392,7 +392,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
 
     print(f"Spawned {len(agents)} agents")
 
-    # ── sim constants ─────────────────────────────────────────────
+    #  sim constants 
     DT         = 0.1
     MAX_STEPS  = int(max_time / DT)
     TAU        = 2.0
@@ -400,12 +400,12 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     CELL_SZ    = 30.0
     EXIT_R     = 18.0
 
-    # ── analytics ─────────────────────────────────────────────────
+    #  analytics 
     density_acc    = np.zeros((H, W), dtype=float)
     density_frames = 0
     ts_time, ts_active, ts_evac = [], [], []
 
-    # ── main loop ─────────────────────────────────────────────────
+    #  main loop 
     print("Simulating…")
     t0 = time.time()
 
@@ -413,7 +413,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
         if all(a.done for a in agents):
             break
 
-        # ── fire growth (visual only — routing already handled by hazard_zone) ──
+        #  fire growth (visual only — routing already handled by hazard_zone) 
         # SFM updates every 0.5s of sim time (step%10 at its DT=0.05) for a
         # 120s-long run. RVO's sim can run far longer than that while agents
         # are still evacuating, so cap fire growth at the same 120s budget —
@@ -544,9 +544,9 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     print("Outputs saved in output/")
 
 
-# ══════════════════════════════════════════════════════════════════
+# 
 #  OUTPUT HELPERS
-# ══════════════════════════════════════════════════════════════════
+# 
 
 def _save_paths(agents, exits_px, walkable, W, H, done_n, fire_intensity=None):
     base = np.zeros((H, W, 3), dtype=np.uint8)

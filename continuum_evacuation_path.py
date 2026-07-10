@@ -10,7 +10,7 @@ from skimage.feature import peak_local_max
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-# ══════════════════════════════════════════════════════════════
+# 
 CFG = {
     "mask_path":    "",
     "zone_config": "stitched_mask_zone_config.json",
@@ -314,7 +314,7 @@ def main():
     exits_px = [(int(e["x"]), int(e["y"])) for e in exits_raw]
     print(f"  {len(exits_px)} exits")
 
-    # ── hazard: carve a permanent no-go zone ──────────
+    #  hazard: carve a permanent no-go zone 
     hazard_cfg = zcfg.get("hazard")
     hazard_zone = np.zeros((wm.h, wm.w), dtype=bool)
     fire_intensity = np.zeros((wm.h, wm.w), dtype=np.float32)
@@ -403,9 +403,9 @@ def main():
             grid.splat(agents)
             grid.build_phi()
 
-        # ── fire growth (visual + soft push only — routing around the
+        #  fire growth (visual + soft push only — routing around the
         #    hazard is already permanently handled by hazard_zone in
-        #    ContGrid.walkable, same split as SFM/RVO) ──────────────────
+        #    ContGrid.walkable, same split as SFM/RVO) 
         if hazard_cfg and step % 10 == 0:
             fire_intensity = spread_fire(fire_intensity, wm.walkable, DT * 10,
                                           CFG["fire_spread_speed"], CFG["fire_intensity_factor"])
@@ -523,7 +523,7 @@ def main():
     total      = len(agents)
     print(f"Done  t={sim_time:.1f}s  evacuated={evac_final}/{total}")
 
-    # ── Analysis report ────────────────────────────────────────
+    #  Analysis report 
     times = [a["time"] for a in agents if a["done"] and a["time"] is not None]
     rate  = evac_final / total
 
@@ -613,8 +613,8 @@ def main():
     lines += ["", "-"*55, "  EXIT UTILIZATION", "-"*55]
     for idx, (ex, ey) in enumerate(exits_px):
         pct    = (exit_counts[idx] / total_evac * 100) if total_evac > 0 else 0
-        bar    = "█" * int(pct / 5)
-        status = "⚠ UNDERUSED" if pct < (100 / len(exits_px) * 0.4) else ""
+        bar    = "" * int(pct / 5)
+        status = " UNDERUSED" if pct < (100 / len(exits_px) * 0.4) else ""
         lines.append(f"  Exit {idx} ({ex},{ey}): {exit_counts[idx]:3d} agents  {pct:5.1f}%  {bar} {status}")
     lines += ["", "-"*55, "  TOP BOTTLENECKS  (ranked by agent-seconds lost)", "-"*55]
     for rank, bn in enumerate(top_bn):
@@ -642,7 +642,7 @@ def main():
         f.write(report)
     print("Saved -> output/continuum_report.txt")
 
-    # ── Render ────────────────────────────────────────────────
+    #  Render 
     print("\nRendering...")
     out = np.zeros((wm.h, wm.w, 3), dtype=np.uint8)
     out[wm.raw >= 128] = CFG["wall_color"]
