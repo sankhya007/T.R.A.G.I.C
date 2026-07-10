@@ -916,8 +916,14 @@ class View2_ZoneEditor(QWidget):
         self.load_config_btn.clicked.connect(self._load_config)
         lv.addWidget(self.load_config_btn)
 
+        # self.auto_load_label = QLabel("")
+        # self.auto_load_label.setStyleSheet(f"color: {DARK['success']}; font-size: 8pt;")
+        # lv.addWidget(self.auto_load_label)
+        
         self.auto_load_label = QLabel("")
-        self.auto_load_label.setStyleSheet(f"color: {DARK['success']}; font-size: 8pt;")
+        self.auto_load_label.setStyleSheet(
+            f"color: {DARK['success']}; font-size: 10pt; font-weight: bold;")
+        self.auto_load_label.setWordWrap(True)
         lv.addWidget(self.auto_load_label)
 
         lv.addWidget(self._sep())
@@ -1739,8 +1745,13 @@ class View3_Simulation(QWidget):
     def __init__(self, state: AppState):
         super().__init__()
         self.state = state
+        # self._worker: Optional[Worker] = None
+        # self._param_widgets = {}
+        # self._saved_params = {}   # {model_key: {param_key: value}} — persists user edits
+        # self._build_ui()
         self._worker: Optional[Worker] = None
         self._param_widgets = {}
+        self._model_btns = {}
         self._saved_params = {}   # {model_key: {param_key: value}} — persists user edits
         self._build_ui()
 
@@ -1764,9 +1775,15 @@ class View3_Simulation(QWidget):
         lv.addWidget(self._sep())
         lv.addWidget(self._section_label("SELECT MODEL"))
 
-        self._model_btns = {}
+        # self._model_btns = {}
+        # for key, cfg in MODEL_CONFIGS.items():
+        #     btn = QPushButton(f"{cfg['display']}\n{cfg['desc'][:50]}…" if len(cfg['desc']) > 50 else f"{cfg['display']}\n{cfg['desc']}")
+        #     btn.setObjectName("model_card")
+        #     btn.setFixedHeight(68)
+        
+        # full model description 
         for key, cfg in MODEL_CONFIGS.items():
-            btn = QPushButton(f"{cfg['display']}\n{cfg['desc'][:50]}…" if len(cfg['desc']) > 50 else f"{cfg['display']}\n{cfg['desc']}")
+            btn = QPushButton(f"{cfg['display']}\n{cfg['desc']}")
             btn.setObjectName("model_card")
             btn.setFixedHeight(68)
             btn.clicked.connect(lambda checked, k=key: self._select_model(k))
@@ -1828,12 +1845,23 @@ class View3_Simulation(QWidget):
         io_group.setLayout(io_layout)
         mv.addWidget(io_group)
 
-        self.run_btn = QPushButton("Run Simulation")
+        # self.run_btn = QPushButton("Run Simulation")
+        # self.run_btn.setObjectName("primary")
+        # self.run_btn.setEnabled(False)
+        # self.run_btn.clicked.connect(self._run)
+        # mv.addWidget(self.run_btn)
+
+        reset_btn = QPushButton("Reset to Defaults")
+        reset_btn.setToolTip("Restore all parameters to their default values.")
+        reset_btn.clicked.connect(self._reset_params)
+        mv.addWidget(reset_btn)
+
+        self.run_btn = QPushButton("▶  Run Simulation")
         self.run_btn.setObjectName("primary")
         self.run_btn.setEnabled(False)
         self.run_btn.clicked.connect(self._run)
         mv.addWidget(self.run_btn)
-
+        
         # ── Right: output viewer ─────────────────────────
         right = QFrame(); right.setObjectName("panel")
         rv = QVBoxLayout(right)
@@ -1898,6 +1926,15 @@ class View3_Simulation(QWidget):
     def _update_run_btn(self):
         has_inputs = bool(self.state.mask_path and self.state.zone_config_path)
         self.run_btn.setEnabled(has_inputs and self.state.selected_model != "")
+        
+    # reset to default for the peremeters of the selected model
+    def _reset_params(self):
+        key = self.state.selected_model
+        if not key:
+            return
+        for (label, key_p, typ, mn, mx, default, step, dec, tip) in MODEL_CONFIGS[key]["params"]:
+            if key_p in self._param_widgets:
+                self._param_widgets[key_p].setValue(default)
 
     def _select_model(self, key: str):
         self.state.selected_model = key
@@ -1966,11 +2003,19 @@ class View3_Simulation(QWidget):
         output = cfg["output"]
         self.state.output_image_path = output
 
+        # self.run_btn.setEnabled(False)
+        # self.save_img_btn.setEnabled(False)
+        # self.progress_bar.setVisible(True)
+        # self.progress_bar.setValue(0)
+        # self.status_label.setText("Starting simulation...")
+        
         self.run_btn.setEnabled(False)
         self.save_img_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status_label.setText("Starting simulation...")
+        for btn in self._model_btns.values():
+            btn.setEnabled(False)
 
         self._worker = Worker(
             _run_simulation,
@@ -1990,6 +2035,8 @@ class View3_Simulation(QWidget):
     def _on_done(self, success, msg):
         self.progress_bar.setVisible(False)
         self.run_btn.setEnabled(True)
+        for btn in self._model_btns.values():
+            btn.setEnabled(True)
         if success:
             self.status_label.setText("Simulation complete")
             self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
