@@ -752,9 +752,50 @@ class View1_MapParser(QWidget):
         if not self.state.image_path:
             return
         if not Path("unet.pth").exists():
-            QMessageBox.warning(self, "Missing Model",
-                "unet.pth not found in the current directory.\n"
-                "Make sure you run this from the project root.")
+            reply = QMessageBox.question(
+                self, "Model Weights Missing",
+                "unet.pth not found.\n\n"
+                "Download it now from HuggingFace? (~30 MB)\n"
+                "https://huggingface.co/sankhya007/Floorplan_parser_STITCH\n\n"
+                "Click Yes to auto-download, No to cancel.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            self.run_btn.setEnabled(False)
+            self.status_label.setText("Downloading unet.pth...")
+            self.status_label.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+
+            def _download(progress_cb=None):
+                import urllib.request
+                url = (
+                    "https://huggingface.co/sankhya007/Floorplan_parser_STITCH"
+                    "/resolve/main/unet.pth"
+                )
+                dest = Path("unet.pth")
+                with urllib.request.urlopen(url) as response:
+                    total = int(response.headers.get("Content-Length", 0))
+                    downloaded = 0
+                    chunk = 1024 * 64
+                    with open(dest, "wb") as f:
+                        while True:
+                            buf = response.read(chunk)
+                            if not buf:
+                                break
+                            f.write(buf)
+                            downloaded += len(buf)
+                            if total and progress_cb:
+                                progress_cb(int(downloaded / total * 100),
+                                            f"Downloading... {downloaded // 1024 // 1024} MB")
+                if progress_cb:
+                    progress_cb(100, "Download complete")
+
+            self._dl_worker = Worker(_download)
+            self._dl_worker.progress.connect(self._on_progress)
+            self._dl_worker.finished.connect(self._on_download_done)
+            self._dl_worker.start()
             return
 
         self.run_btn.setEnabled(False)
@@ -809,6 +850,21 @@ class View1_MapParser(QWidget):
         else:
             self.status_label.setText(f"Error: {msg}")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
+
+    def _on_download_done(self, success, msg):
+        self.progress_bar.setVisible(False)
+        self.run_btn.setEnabled(True)
+        if success:
+            self.status_label.setText("Download complete — running parser now")
+            self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
+            self._run()   # kick off the parse immediately
+        else:
+            self.status_label.setText(f"Download failed: {msg}")
+            self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
+            QMessageBox.warning(self, "Download Failed",
+                f"Could not download unet.pth:\n{msg}\n\n"
+                "Download it manually from:\n"
+                "https://huggingface.co/sankhya007/Floorplan_parser_STITCH")
 
     def _load_existing_mask(self):
         path, _ = QFileDialog.getOpenFileName(
