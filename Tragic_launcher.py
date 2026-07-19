@@ -688,12 +688,18 @@ class View1_MapParser(QWidget):
         self.tweak_btn.setVisible(False)
         self.tweak_btn.clicked.connect(self._run)
 
+        self.debug_btn = QPushButton("🔍 Debug Mask")
+        self.debug_btn.setToolTip("Apply Gaussian blur + re-threshold to clean up the mask. Zone editor will use the cleaned version.")
+        self.debug_btn.setVisible(False)
+        self.debug_btn.clicked.connect(self._debug_mask)
+
         self.proceed_btn = QPushButton("Proceed to Zones →")
         self.proceed_btn.setObjectName("primary")
         self.proceed_btn.setVisible(False)
         self.proceed_btn.clicked.connect(self._proceed)
 
         btn_row.addWidget(self.tweak_btn)
+        btn_row.addWidget(self.debug_btn)
         btn_row.addWidget(self.proceed_btn)
         lv.addLayout(btn_row)
 
@@ -800,6 +806,7 @@ class View1_MapParser(QWidget):
 
         self.run_btn.setEnabled(False)
         self.tweak_btn.setVisible(False)
+        self.debug_btn.setVisible(False)
         self.proceed_btn.setVisible(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
@@ -846,10 +853,44 @@ class View1_MapParser(QWidget):
                     f"Walls: {100*white//total}%  |  Walkable: {100*black//total}%"
                 )
             self.tweak_btn.setVisible(True)
+            self.debug_btn.setVisible(True)
             self.proceed_btn.setVisible(True)
         else:
             self.status_label.setText(f"Error: {msg}")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
+
+    def _debug_mask(self):
+        if not self.state.mask_path or not Path(self.state.mask_path).exists():
+            return
+
+        img = cv2.imread(self.state.mask_path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return
+
+        # Gaussian blur — smooths salt-and-pepper noise and fills small gaps
+        blurred = cv2.GaussianBlur(img.astype(np.float32) / 255.0, (0, 0), sigmaX=2.0)
+
+        # Re-threshold at 0.5 on the blurred float image
+        binary = (blurred > 0.5).astype(np.uint8)
+
+        # Same morphological cleanup as the tiled predictor
+        k = np.ones((3, 3), np.uint8)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k)
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k)
+        binary = cv2.dilate(binary, np.ones((2, 2), np.uint8), iterations=1)
+
+        cv2.imwrite(self.state.mask_path, binary * 255)
+
+        self.preview.load_image(self.state.mask_path)
+        white = int((binary > 0).sum())
+        total = binary.size
+        self.preview_info.setText(
+            f"Size: {binary.shape[1]}×{binary.shape[0]}px  |  "
+            f"Walls: {100*white//total}%  |  Walkable: {100*(total-white)//total}%  "
+            f"[debug applied]"
+        )
+        self.status_label.setText("Debug mask applied — proceed when ready")
+        self.status_label.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
 
     def _on_download_done(self, success, msg):
         self.progress_bar.setVisible(False)
