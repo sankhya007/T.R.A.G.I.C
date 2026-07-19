@@ -29,6 +29,7 @@ T.R.A.G.I.C/
 ├── continuum_evacuation_path.py # Continuum Crowds (Treuille 2006)
 ├── continuum_evacuation_sim.py  # Interactive continuum viewer (This is not connected to the code, kinda unnecessary. lol)
 ├── CA_evacuation.py             # Cellular Automata
+├── test_images/                 # curated images where you can get the ebst results
 └── output/                      # Everything written here at runtime
     ├── sfm_agent_paths.png
     ├── rvo_agent_paths.png
