@@ -812,9 +812,17 @@ class View1_MapParser(QWidget):
 
     def _load_existing_mask(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Existing Mask", "", "Images (*.png *.jpg *.bmp)")
+            self, "Select Existing Mask or Zone Config", "",
+            "All supported (*.png *.jpg *.bmp *.json);;Images (*.png *.jpg *.bmp);;Zone Config (*.json)")
         if not path:
             return
+
+        # JSON → hand off to View 2 and jump straight there
+        if path.lower().endswith(".json"):
+            self.window().view2._load_config_from_path(path)
+            self.window()._go_to(1)
+            return
+
         self.state.mask_path = path
         self.preview.load_image(path)
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
