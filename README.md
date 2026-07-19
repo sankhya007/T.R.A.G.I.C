@@ -22,13 +22,14 @@ T.R.A.G.I.C/
 ├── Tragic_launcher.py           # Main GUI — 3-view pipeline
 ├── predict_tiled.py             # Standalone map parser (no GUI)
 ├── model.py                     # U-Net definition
-├── unet.pth                     # Trained weights (you need this)
+├── unet.pth                     # Trained weights (auto-downloaded on first run)
 ├── zone_detector.py             # Standalone zone editor (no GUI)
 ├── SFM_evacuation.py            # Social Force Model
 ├── RVO_evacuation.py            # Reciprocal Velocity Obstacles
 ├── continuum_evacuation_path.py # Continuum Crowds (Treuille 2006)
 ├── continuum_evacuation_sim.py  # Interactive continuum viewer (This is not connected to the code, kinda unnecessary. lol)
 ├── CA_evacuation.py             # Cellular Automata
+├── test_images/                 # curated images where you can get the ebst results
 └── output/                      # Everything written here at runtime
     ├── sfm_agent_paths.png
     ├── rvo_agent_paths.png
@@ -51,7 +52,7 @@ The pipeline has three stages:
 
 ## Quick Start
 
-**Prerequisites:** Python 3.10+, and `unet.pth` placed in the project root.
+**Prerequisites:** Python 3.10+
 
 ```bash
 git clone https://github.com/sankhya007/T.R.A.G.I.C
@@ -69,14 +70,9 @@ pip install opencv-python numpy scipy scikit-image PyQt6
 python Tragic_launcher.py
 ```
 
-Don't want to train the Model yourself? No problem here is the lin to download:
-
-[Hugging Face Link](https://huggingface.co/sankhya007/Floorplan_parser_STITCH/tree/main)
-
-
-
-
 No config files, no environment variables. Everything is driven through the UI.
+
+> **Model weights** (`unet.pth`) are downloaded automatically the first time you run the parser. If you'd rather grab them manually: [HuggingFace](https://huggingface.co/sankhya007/Floorplan_parser_STITCH/tree/main)
 
 ---
 
@@ -139,6 +135,10 @@ CA doesn't have a velocity field to push agents around with, so its version of f
 ### 4. Four Simulation Algorithms
 
 All four models take the same inputs and produce the same output structure: scored image with agent trails, exit utilization percentages, and bottleneck markers.
+
+A **Compare All Models** button runs all four sequentially on the same config and shows a side-by-side score table. Each model's output image is kept in the viewer — use the **< >** buttons in the output panel to browse between runs without losing earlier results. The **View Report** button always opens the report for whichever image you're currently looking at.
+
+To resume a previous session, use **Load Existing Mask** in View 1 — it now accepts a zone config JSON directly and jumps straight to the Zone Editor with everything loaded.
 
 | Model | Core mechanic | Best for |
 |---|---|---|
