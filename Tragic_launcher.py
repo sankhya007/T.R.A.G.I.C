@@ -1725,6 +1725,8 @@ class View3_Simulation(QWidget):
         self._param_widgets = {}
         self._model_btns = {}
         self._saved_params = {}   # {model_key: {param_key: value}} — persists user edits
+        self._results = []        # list of (image_path, report_path, label) — all completed runs
+        self._current_idx = -1   # which result is currently shown
         self._build_ui()
 
     def _build_ui(self):
@@ -1827,7 +1829,13 @@ class View3_Simulation(QWidget):
         self.run_btn.setEnabled(False)
         self.run_btn.clicked.connect(self._run)
         mv.addWidget(self.run_btn)
-        
+
+        self.compare_btn = QPushButton("⚖  Compare All Models")
+        self.compare_btn.setEnabled(False)
+        self.compare_btn.setToolTip("Run all four models on the same config and show a score table.")
+        self.compare_btn.clicked.connect(self._run_compare)
+        mv.addWidget(self.compare_btn)
+
         # ── Right: output viewer ─────────────────────────
         right = QFrame(); right.setObjectName("panel")
         rv = QVBoxLayout(right)
@@ -1837,6 +1845,21 @@ class View3_Simulation(QWidget):
         output_header = QHBoxLayout()
         output_title = QLabel("Simulation Output")
         output_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+
+        self.nav_prev_btn = QPushButton("<")
+        self.nav_prev_btn.setFixedWidth(32)
+        self.nav_prev_btn.setEnabled(False)
+        self.nav_prev_btn.clicked.connect(self._show_prev)
+
+        self.nav_label = QLabel("")
+        self.nav_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.nav_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt; min-width: 80px;")
+
+        self.nav_next_btn = QPushButton(">")
+        self.nav_next_btn.setFixedWidth(32)
+        self.nav_next_btn.setEnabled(False)
+        self.nav_next_btn.clicked.connect(self._show_next)
+
         self.fit_btn = QPushButton("Fit")
         self.fit_btn.setFixedWidth(50)
         self.fit_btn.clicked.connect(lambda: self.output_view.reset_zoom())
@@ -1846,8 +1869,13 @@ class View3_Simulation(QWidget):
         self.view_report_btn = QPushButton("View Report")
         self.view_report_btn.setEnabled(False)
         self.view_report_btn.clicked.connect(self._view_report)
+
         output_header.addWidget(output_title)
         output_header.addStretch()
+        output_header.addWidget(self.nav_prev_btn)
+        output_header.addWidget(self.nav_label)
+        output_header.addWidget(self.nav_next_btn)
+        output_header.addSpacing(8)
         output_header.addWidget(self.fit_btn)
         output_header.addWidget(self.save_img_btn)
         output_header.addWidget(self.view_report_btn)
@@ -1892,6 +1920,7 @@ class View3_Simulation(QWidget):
     def _update_run_btn(self):
         has_inputs = bool(self.state.mask_path and self.state.zone_config_path)
         self.run_btn.setEnabled(has_inputs and self.state.selected_model != "")
+        self.compare_btn.setEnabled(has_inputs)
         
     # reset to default for the peremeters of the selected model
     def _reset_params(self):
@@ -1948,6 +1977,64 @@ class View3_Simulation(QWidget):
 
         self._update_run_btn()
 
+    def _run_compare(self):
+        if not self.state.mask_path or not self.state.zone_config_path:
+            QMessageBox.warning(self, "Missing Inputs",
+                "Both mask and zone config are required.")
+            return
+        if not Path("compare_models.py").exists():
+            QMessageBox.warning(self, "Script Not Found",
+                "compare_models.py not found in the project root.")
+            return
+
+        self.compare_btn.setEnabled(False)
+        self.run_btn.setEnabled(False)
+        for btn in self._model_btns.values():
+            btn.setEnabled(False)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("Running all models — this will take a while...")
+
+        import os, shutil
+        runtime_mask = Path("stitched_mask.png")
+        runtime_zone_config = Path("zone_config.json")
+        runtime_stitched_config = Path("stitched_mask_zone_config.json")
+        if Path(self.state.mask_path).resolve() != runtime_mask.resolve():
+            shutil.copy2(self.state.mask_path, runtime_mask)
+        with open(self.state.zone_config_path, "r", encoding="utf-8") as f:
+            zone_config = json.load(f)
+        zone_config["mask_path"] = str(runtime_mask)
+        for target in (runtime_zone_config, runtime_stitched_config):
+            with open(target, "w", encoding="utf-8") as f:
+                json.dump(zone_config, f, indent=2)
+
+        def _do_compare(progress_cb=None):
+            proc = subprocess.Popen(
+                [sys.executable, "compare_models.py", "stitched_mask.png", "zone_config.json"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+            )
+            pct = 0
+            for line in proc.stdout:
+                line = line.strip()
+                if line and progress_cb:
+                    pct = min(pct + 3, 95)
+                    progress_cb(pct, line[:80])
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"compare_models.py exited with code {proc.returncode}")
+            if progress_cb:
+                progress_cb(100, "Done")
+
+        self._compare_worker = Worker(_do_compare)
+        self._compare_worker.progress.connect(self._on_progress)
+        self._compare_worker.finished.connect(self._on_compare_done)
+        self._compare_worker.start()
+
     def _run(self):
         if not self.state.mask_path or not self.state.zone_config_path:
             QMessageBox.warning(self, "Missing Inputs",
@@ -2000,16 +2087,19 @@ class View3_Simulation(QWidget):
         if success:
             self.status_label.setText("Simulation complete")
             self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
-            self.output_view.load_image(self.state.output_image_path)
-            img = cv2.imread(self.state.output_image_path)
-            if img is not None:
-                self.output_info.setText(
-                    f"Output: {self.state.output_image_path}  |  "
-                    f"Size: {img.shape[1]}×{img.shape[0]}px")
-            self.save_img_btn.setEnabled(True)
-            self.view_report_btn.setEnabled(Path("last_sim_report.txt").exists())
-        
-        #error dialogue box updated
+
+            key = self.state.selected_model
+            img_path = MODEL_CONFIGS[key]["output"]
+            report_src = {
+                "SFM_evacuation.py":            "output/SFM_output_report.txt",
+                "RVO_evacuation.py":            "output/RVO_output_report.txt",
+                "continuum_evacuation_path.py": "output/continuum_report.txt",
+                "CA_evacuation.py":             "output/ca_report.txt",
+            }.get(MODEL_CONFIGS[key]["script"], "last_sim_report.txt")
+            report_path = report_src if Path(report_src).exists() else ""
+            self._results.append((img_path, report_path, MODEL_CONFIGS[key]["display"]))
+            self._show_result(len(self._results) - 1)
+
         else:
             self.status_label.setText("Simulation failed — see error dialog")
             self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
@@ -2043,6 +2133,93 @@ class View3_Simulation(QWidget):
             dl.addLayout(row)
             dlg.exec()
 
+    def _on_compare_done(self, success, msg):
+        self.progress_bar.setVisible(False)
+        for btn in self._model_btns.values():
+            btn.setEnabled(True)
+        self._update_run_btn()
+        if not success:
+            self.status_label.setText("Compare failed")
+            self.status_label.setStyleSheet(f"color: {DARK['danger']}; font-size: 9pt;")
+            return
+
+        self.status_label.setText("All models complete")
+        self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
+
+        # Add each model's result individually so the user can nav through them
+        script_map = {
+            "SFM":       ("output/sfm_agent_paths.png",        "output/SFM_output_report.txt"),
+            "RVO":       ("output/rvo_agent_paths.png",        "output/RVO_output_report.txt"),
+            "CA":        ("output/ca_paths.png",               "output/ca_report.txt"),
+            "Continuum": ("output/continuum_agent_paths.png",  "output/continuum_report.txt"),
+        }
+        for label, (img_p, rep_p) in script_map.items():
+            if Path(img_p).exists():
+                self._results.append((img_p, rep_p if Path(rep_p).exists() else "", label))
+        if self._results:
+            self._show_result(len(self._results) - len([v for v in script_map.values() if Path(v[0]).exists()]))
+
+        # Also show the summary table in a dialog
+        report_path = "output/model_comparison.txt"
+        if Path(report_path).exists():
+            text = Path(report_path).read_text(encoding="utf-8", errors="replace")
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Model Comparison")
+            dlg.resize(680, 300)
+            dlg.setStyleSheet(f"background: {DARK['panel']}; color: {DARK['text']};")
+            dl = QVBoxLayout(dlg)
+            dl.setContentsMargins(16, 16, 16, 16)
+            tb = QTextEdit()
+            tb.setReadOnly(True)
+            tb.setPlainText(text)
+            tb.setStyleSheet(f"""
+                QTextEdit {{
+                    background: {DARK['input_bg']};
+                    color: {DARK['text']};
+                    border: 1px solid {DARK['border']};
+                    border-radius: 6px;
+                    font-family: 'Consolas', 'Courier New', monospace;
+                    font-size: 10pt;
+                    padding: 8px;
+                }}
+            """)
+            dl.addWidget(tb)
+            close = QPushButton("Close")
+            close.setFixedWidth(80)
+            close.clicked.connect(dlg.accept)
+            row = QHBoxLayout()
+            row.addStretch(); row.addWidget(close)
+            dl.addLayout(row)
+            dlg.exec()
+
+    def _show_result(self, idx: int):
+        """Display the result at idx and update nav buttons."""
+        if not self._results or idx < 0 or idx >= len(self._results):
+            return
+        self._current_idx = idx
+        img_path, report_path, label = self._results[idx]
+
+        self.output_view.load_image(img_path)
+        img = cv2.imread(img_path)
+        if img is not None:
+            self.output_info.setText(
+                f"{label}  |  {img_path}  |  {img.shape[1]}×{img.shape[0]}px")
+        self.state.output_image_path = img_path
+
+        self.save_img_btn.setEnabled(True)
+        self.view_report_btn.setEnabled(bool(report_path and Path(report_path).exists()))
+
+        n = len(self._results)
+        self.nav_label.setText(f"{idx + 1} / {n}")
+        self.nav_prev_btn.setEnabled(idx > 0)
+        self.nav_next_btn.setEnabled(idx < n - 1)
+
+    def _show_prev(self):
+        self._show_result(self._current_idx - 1)
+
+    def _show_next(self):
+        self._show_result(self._current_idx + 1)
+
     def _save_image(self):
         if not self.state.output_image_path or not Path(self.state.output_image_path).exists():
             return
@@ -2055,8 +2232,11 @@ class View3_Simulation(QWidget):
             shutil.copy2(self.state.output_image_path, dest)
 
     def _view_report(self):
-        report_path = "last_sim_report.txt"
-        if not Path(report_path).exists():
+        # Use the report that belongs to the currently displayed result
+        report_path = ""
+        if 0 <= self._current_idx < len(self._results):
+            report_path = self._results[self._current_idx][1]
+        if not report_path or not Path(report_path).exists():
             QMessageBox.information(self, "No Report", "No report file found for this simulation.")
             return
         try:
