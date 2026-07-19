@@ -423,6 +423,85 @@ class ZoomableImageView(QGraphicsView):
             self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
 
 
+class EditableImageView(ZoomableImageView):
+    """ZoomableImageView that can optionally intercept mouse events to draw
+    white lines (walls) directly onto the mask image."""
+
+    def __init__(self, placeholder_text="No image loaded"):
+        super().__init__(placeholder_text)
+        self.edit_mode = False          # toggled by the Edit Mask button
+        self.brush_size = 6             # px in image coordinates
+        self._canvas: Optional[np.ndarray] = None   # grayscale uint8 working copy
+        self._last_pt: Optional[tuple] = None       # previous mouse position in image coords
+
+    # ── public API ──────────────────────────────────────────────────
+
+    def load_canvas(self, path: str):
+        """Load image and keep a numpy copy for drawing."""
+        img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return
+        self._canvas = img.copy()
+        self._refresh_pixmap()
+        self._scene.setSceneRect(QRectF(0, 0, img.shape[1], img.shape[0]))
+        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def get_canvas(self) -> Optional[np.ndarray]:
+        return self._canvas
+
+    # ── mouse drawing ───────────────────────────────────────────────
+
+    def mousePressEvent(self, event):
+        if self.edit_mode and event.button() == Qt.MouseButton.LeftButton:
+            pt = self._to_image(event.position())
+            if pt:
+                self._last_pt = pt
+                cv2.circle(self._canvas, pt, self.brush_size // 2, 255, -1)
+                self._refresh_pixmap()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self.edit_mode and (event.buttons() & Qt.MouseButton.LeftButton):
+            pt = self._to_image(event.position())
+            if pt and self._last_pt:
+                cv2.line(self._canvas, self._last_pt, pt, 255, self.brush_size)
+                self._refresh_pixmap()
+            self._last_pt = pt
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self.edit_mode:
+            self._last_pt = None
+        else:
+            super().mouseReleaseEvent(event)
+
+    # ── helpers ─────────────────────────────────────────────────────
+
+    def _to_image(self, qpointf) -> Optional[tuple]:
+        """Map a view-space QPointF → integer image pixel (x, y)."""
+        if self._canvas is None:
+            return None
+        scene_pt = self.mapToScene(int(qpointf.x()), int(qpointf.y()))
+        h, w = self._canvas.shape[:2]
+        x = int(np.clip(scene_pt.x(), 0, w - 1))
+        y = int(np.clip(scene_pt.y(), 0, h - 1))
+        return (x, y)
+
+    def _refresh_pixmap(self):
+        if self._canvas is None:
+            return
+        h, w = self._canvas.shape
+        qimg = QImage(self._canvas.data, w, h, w, QImage.Format.Format_Grayscale8)
+        pix = QPixmap.fromImage(qimg)
+        if self._pixmap_item is None:
+            self._pixmap_item = QGraphicsPixmapItem(pix)
+            self._scene.addItem(self._pixmap_item)
+        else:
+            self._pixmap_item.setPixmap(pix)
+
+
 # ══════════════════════════════════════════════════════════
 #  TOAST NOTIFICATION
 # ══════════════════════════════════════════════════════════
@@ -715,12 +794,33 @@ class View1_MapParser(QWidget):
         self.reset_zoom_btn = QPushButton("Fit")
         self.reset_zoom_btn.setFixedWidth(50)
         self.reset_zoom_btn.clicked.connect(lambda: self.preview.reset_zoom())
+
+        self.edit_btn = QPushButton("✏ Edit Mask")
+        self.edit_btn.setCheckable(True)
+        self.edit_btn.setVisible(False)
+        self.edit_btn.clicked.connect(self._toggle_edit)
+
+        self.brush_spin = QSpinBox()
+        self.brush_spin.setRange(1, 40)
+        self.brush_spin.setValue(6)
+        self.brush_spin.setFixedWidth(55)
+        self.brush_spin.setToolTip("Brush thickness in pixels")
+        self.brush_spin.setVisible(False)
+        self.brush_spin.valueChanged.connect(lambda v: setattr(self.preview, 'brush_size', v))
+
+        self.save_edits_btn = QPushButton("💾 Save")
+        self.save_edits_btn.setVisible(False)
+        self.save_edits_btn.clicked.connect(self._save_edits)
+
         preview_header.addWidget(preview_title)
         preview_header.addStretch()
+        preview_header.addWidget(self.edit_btn)
+        preview_header.addWidget(self.brush_spin)
+        preview_header.addWidget(self.save_edits_btn)
         preview_header.addWidget(self.reset_zoom_btn)
         rv.addLayout(preview_header)
 
-        self.preview = ZoomableImageView("Run the parser to see the output mask here.\nWhite = walls  |  Black = walkable space")
+        self.preview = EditableImageView("Run the parser to see the output mask here.\nWhite = walls  |  Black = walkable space")
         rv.addWidget(self.preview)
 
         self.preview_info = QLabel("")
@@ -807,6 +907,10 @@ class View1_MapParser(QWidget):
         self.run_btn.setEnabled(False)
         self.tweak_btn.setVisible(False)
         self.debug_btn.setVisible(False)
+        self.edit_btn.setVisible(False)
+        self.edit_btn.setChecked(False)
+        self.brush_spin.setVisible(False)
+        self.save_edits_btn.setVisible(False)
         self.proceed_btn.setVisible(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
@@ -842,7 +946,7 @@ class View1_MapParser(QWidget):
         if success:
             self.status_label.setText("Mask generated successfully")
             self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
-            self.preview.load_image(self.state.mask_path)
+            self.preview.load_canvas(self.state.mask_path)
             img = cv2.imread(self.state.mask_path, cv2.IMREAD_GRAYSCALE)
             if img is not None:
                 white = np.sum(img > 127)
@@ -854,6 +958,9 @@ class View1_MapParser(QWidget):
                 )
             self.tweak_btn.setVisible(True)
             self.debug_btn.setVisible(True)
+            self.edit_btn.setVisible(True)
+            self.brush_spin.setVisible(True)
+            self.save_edits_btn.setVisible(True)
             self.proceed_btn.setVisible(True)
         else:
             self.status_label.setText(f"Error: {msg}")
@@ -881,7 +988,7 @@ class View1_MapParser(QWidget):
 
         cv2.imwrite(self.state.mask_path, binary * 255)
 
-        self.preview.load_image(self.state.mask_path)
+        self.preview.load_canvas(self.state.mask_path)
         white = int((binary > 0).sum())
         total = binary.size
         self.preview_info.setText(
@@ -891,6 +998,29 @@ class View1_MapParser(QWidget):
         )
         self.status_label.setText("Debug mask applied — proceed when ready")
         self.status_label.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
+
+    def _toggle_edit(self, checked):
+        self.preview.edit_mode = checked
+        if checked:
+            self.edit_btn.setText("✏ Editing...")
+            self.edit_btn.setStyleSheet(f"background: {DARK['warning']}; color: black; font-weight: bold;")
+            self.preview.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.status_label.setText("Draw mode: click and drag to paint walls. Save when done.")
+            self.status_label.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
+        else:
+            self.edit_btn.setText("✏ Edit Mask")
+            self.edit_btn.setStyleSheet("")
+            self.preview.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.status_label.setText("Edit mode off.")
+            self.status_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
+
+    def _save_edits(self):
+        canvas = self.preview.get_canvas()
+        if canvas is None or not self.state.mask_path:
+            return
+        cv2.imwrite(self.state.mask_path, canvas)
+        self.status_label.setText("Edits saved — proceed when ready")
+        self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
 
     def _on_download_done(self, success, msg):
         self.progress_bar.setVisible(False)
@@ -921,7 +1051,7 @@ class View1_MapParser(QWidget):
             return
 
         self.state.mask_path = path
-        self.preview.load_image(path)
+        self.preview.load_canvas(path)
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
         if img is not None:
             white = np.sum(img > 127)
@@ -934,6 +1064,10 @@ class View1_MapParser(QWidget):
         self.status_label.setText(f"Loaded: {Path(path).name}")
         self.status_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
         self.tweak_btn.setVisible(False)
+        self.debug_btn.setVisible(True)
+        self.edit_btn.setVisible(True)
+        self.brush_spin.setVisible(True)
+        self.save_edits_btn.setVisible(True)
         self.proceed_btn.setVisible(True)
 
     def _proceed(self):
