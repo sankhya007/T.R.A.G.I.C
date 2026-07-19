@@ -1,9 +1,11 @@
-# T.R.A.G.I.C.
-### Tactical Risk Assessment & Grid-based Intelligent Crowd Simulation
+# T.R.A.G.I.C. — Crowd Evacuation Simulation & Floorplan Analysis
+### Tactical Risk Assessment & Grid-based Intelligent Crowd Simulation | Social Force Model · RVO · Continuum · Cellular Automata
 
 > Feed it a floorplan. It tells you where people die.
 
 ![Hero — TRAGIC launcher showing a completed SFM simulation with agent trails, bottleneck markers, and a score overlay](docs/hero_launcher.png)
+
+**TRAGIC** is an open-source **crowd evacuation simulation** tool that parses architectural **floorplan images** using a trained **U-Net** segmentation model, then runs **pedestrian dynamics simulations** using four algorithms — Social Force Model (SFM), Reciprocal Velocity Obstacles (RVO), Continuum Crowds, and Cellular Automata (CA). It detects **evacuation bottlenecks**, scores **emergency exit placement**, and models **fire/hazard spread** — all from a single floorplan image with no manual wall tracing.
 
 ---
 
@@ -29,7 +31,6 @@ T.R.A.G.I.C/
 ├── continuum_evacuation_path.py # Continuum Crowds (Treuille 2006)
 ├── continuum_evacuation_sim.py  # Interactive continuum viewer (This is not connected to the code, kinda unnecessary. lol)
 ├── CA_evacuation.py             # Cellular Automata
-├── test_images/                 # curated images where you can get the ebst results
 └── output/                      # Everything written here at runtime
     ├── sfm_agent_paths.png
     ├── rvo_agent_paths.png
@@ -136,10 +137,6 @@ CA doesn't have a velocity field to push agents around with, so its version of f
 
 All four models take the same inputs and produce the same output structure: scored image with agent trails, exit utilization percentages, and bottleneck markers.
 
-A **Compare All Models** button runs all four sequentially on the same config and shows a side-by-side score table. Each model's output image is kept in the viewer — use the **< >** buttons in the output panel to browse between runs without losing earlier results. The **View Report** button always opens the report for whichever image you're currently looking at.
-
-To resume a previous session, use **Load Existing Mask** in View 1 — it now accepts a zone config JSON directly and jumps straight to the Zone Editor with everything loaded.
-
 | Model | Core mechanic | Best for |
 |---|---|---|
 | SFM | Attractive/repulsive force fields | General-purpose |
@@ -174,6 +171,12 @@ Either (a) exit markers landed on a wall pixel — place them clearly inside a c
 
 **Hazard placed but nothing seems to route around it**
 Check the hazard didn't land in a spot where the carved-out radius swallows the only corridor to an exit — if there's no walkable path left, agents just sit at max BFS cost and never evacuate. Either move the hazard or widen the layout.
+
+---
+
+## Keywords
+
+`crowd-evacuation-simulation` `floorplan-parsing` `pedestrian-dynamics` `social-force-model` `building-safety` `emergency-evacuation` `U-Net-segmentation` `fire-hazard-simulation` `occupancy-analysis` `egress-simulation` `RVO` `cellular-automata` `continuum-crowds` `PyQt6` `deep-learning` `computer-vision` `CubiCasa5K`
 
 ---
 
