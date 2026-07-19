@@ -429,10 +429,12 @@ class EditableImageView(ZoomableImageView):
 
     def __init__(self, placeholder_text="No image loaded"):
         super().__init__(placeholder_text)
-        self.edit_mode = False          # toggled by the Edit Mask button
-        self.brush_size = 6             # px in image coordinates
-        self._canvas: Optional[np.ndarray] = None   # grayscale uint8 working copy
-        self._last_pt: Optional[tuple] = None       # previous mouse position in image coords
+        self.edit_mode = False
+        self.brush_size = 6
+        self._canvas: Optional[np.ndarray] = None
+        self._last_pt: Optional[tuple] = None
+        self._undo_stack: list = []
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
     # ── public API ──────────────────────────────────────────────────
 
@@ -442,6 +444,7 @@ class EditableImageView(ZoomableImageView):
         if img is None:
             return
         self._canvas = img.copy()
+        self._undo_stack.clear()
         self._refresh_pixmap()
         self._scene.setSceneRect(QRectF(0, 0, img.shape[1], img.shape[0]))
         self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
@@ -449,10 +452,16 @@ class EditableImageView(ZoomableImageView):
     def get_canvas(self) -> Optional[np.ndarray]:
         return self._canvas
 
+    def undo(self):
+        if self._undo_stack:
+            self._canvas = self._undo_stack.pop()
+            self._refresh_pixmap()
+
     # ── mouse drawing ───────────────────────────────────────────────
 
     def mousePressEvent(self, event):
         if self.edit_mode and event.button() == Qt.MouseButton.LeftButton:
+            self._undo_stack.append(self._canvas.copy())  # snapshot before stroke
             pt = self._to_image(event.position())
             if pt:
                 self._last_pt = pt
@@ -476,6 +485,12 @@ class EditableImageView(ZoomableImageView):
             self._last_pt = None
         else:
             super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if self.edit_mode and event.key() == Qt.Key.Key_Z and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.undo()
+        else:
+            super().keyPressEvent(event)
 
     # ── helpers ─────────────────────────────────────────────────────
 
@@ -1005,7 +1020,8 @@ class View1_MapParser(QWidget):
             self.edit_btn.setText("✏ Editing...")
             self.edit_btn.setStyleSheet(f"background: {DARK['warning']}; color: black; font-weight: bold;")
             self.preview.setDragMode(QGraphicsView.DragMode.NoDrag)
-            self.status_label.setText("Draw mode: click and drag to paint walls. Save when done.")
+            self.preview.setFocus()
+            self.status_label.setText("Draw mode: click and drag to paint walls. Ctrl+Z to undo. Save when done.")
             self.status_label.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
         else:
             self.edit_btn.setText("✏ Edit Mask")
@@ -1339,8 +1355,8 @@ class View2_ZoneEditor(QWidget):
         return l
 
     def on_enter(self):
-        """Called when this view becomes active. Auto-load if mask exists."""
-        if self.binary is None and self.state.mask_path and Path(self.state.mask_path).exists():
+        """Called when this view becomes active. Always reload from disk so edits made in View 1 are picked up."""
+        if self.state.mask_path and Path(self.state.mask_path).exists():
             self._load_mask_from_path(self.state.mask_path)
             self.auto_load_label.setText(f"Auto-loaded: {Path(self.state.mask_path).name}")
 
