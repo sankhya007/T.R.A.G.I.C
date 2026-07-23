@@ -186,6 +186,12 @@ Bug reports, feature requests, and PRs welcome — see `CONTRIBUTING.md` for the
 
 ---
 
+## Testing if linux works
+
+from now on i am going to daily drive linux and this is the 1st time i am tying it out and connecting github to it, seeing if i can push directly in my repo using the SSh key (will delete this segent later on)
+
+---
+
 ## License
 
 MIT — do whatever you want with it.
