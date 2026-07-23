@@ -20,6 +20,9 @@ __pycache__/
 *.avi
 *.gif
 
+# virtual run window 
+venv/
+
 # build 
 build/
 dist/

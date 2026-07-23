@@ -188,7 +188,7 @@ Bug reports, feature requests, and PRs welcome — see `CONTRIBUTING.md` for the
 
 ## Testing if linux works
 
-from now on i am going to daily drive linux and this is the 1st time i am tying it out and connecting github to it, seeing if i can push directly in my repo using the SSh key (will delete this segent later on)
+from now on i am going to daily drive linux and this is the 1st time i am tying it out and connecting github to it, seeing if i can push directly in my repo using the SSh key (will delete this segent later on) - this worked out very nice it was actually way better than windows connection everything worked perfectly lol. I already like it in here. 
 
 ---
 
