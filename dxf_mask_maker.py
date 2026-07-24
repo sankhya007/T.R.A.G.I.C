@@ -164,6 +164,65 @@ class Canvas(QGraphicsView):
             }}
         """)
         self.setMinimumHeight(400)
+        # crop drawing state
+        self._crop_mode     = False
+        self._crop_callback = None
+        self._drag_start    = None   # QPointF in scene coords
+        self._crop_overlay  = None   # QGraphicsRectItem
+
+    def set_crop_callback(self, fn):
+        self._crop_callback = fn
+
+    def set_crop_mode(self, active: bool):
+        self._crop_mode = active
+        if active:
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.CrossCursor)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            if self._crop_overlay:
+                self._scene.removeItem(self._crop_overlay)
+                self._crop_overlay = None
+
+    def mousePressEvent(self, event):
+        if self._crop_mode and self._item is not None:
+            self._drag_start = self.mapToScene(event.pos())
+            if self._crop_overlay:
+                self._scene.removeItem(self._crop_overlay)
+            from PyQt6.QtWidgets import QGraphicsRectItem
+            from PyQt6.QtGui import QBrush
+            self._crop_overlay = self._scene.addRect(
+                QRectF(self._drag_start, self._drag_start),
+                QPen(QColor("#4f8ef7"), 2),
+                QBrush(QColor(79, 142, 247, 40)))
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._crop_mode and self._drag_start is not None and self._crop_overlay:
+            cur = self.mapToScene(event.pos())
+            rect = QRectF(self._drag_start, cur).normalized()
+            self._crop_overlay.setRect(rect)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._crop_mode and self._drag_start is not None and self._item is not None:
+            cur = self.mapToScene(event.pos())
+            rect = QRectF(self._drag_start, cur).normalized()
+            self._drag_start = None
+            # convert scene coords to normalised 0-1 fractions of image size
+            img_rect = self._scene.sceneRect()
+            if img_rect.width() > 0 and img_rect.height() > 0 and rect.width() > 10:
+                x0 = max(0.0, rect.left()   / img_rect.width())
+                y0 = max(0.0, rect.top()    / img_rect.height())
+                x1 = min(1.0, rect.right()  / img_rect.width())
+                y1 = min(1.0, rect.bottom() / img_rect.height())
+                if self._crop_callback:
+                    self._crop_callback((x0, y0, x1, y1))
+            return
+        super().mouseReleaseEvent(event)
 
     def show_image(self, img_bgr: np.ndarray):
         """Feed an OpenCV BGR or single-channel image to the canvas."""
@@ -214,7 +273,9 @@ def collect_layer_names(doc) -> list[str]:
 
 def rasterize_dxf(doc, selected_layers: set[str],
                   resolution: int = 1000,
-                  wall_thickness: int = 6) -> np.ndarray | None:
+                  wall_thickness: int = 6,
+                  crop_rect_norm=None,
+                  padding_pct: int = 5) -> np.ndarray | None:
     """
     Rasterize selected DXF layers into a binary mask.
 
@@ -253,6 +314,26 @@ def rasterize_dxf(doc, selected_layers: set[str],
     if span_x < 1e-9 or span_y < 1e-9:
         return None
 
+    # ── apply crop region if set ──
+    # crop_rect_norm is (x0, y0, x1, y1) as fractions of the full bounding box
+    # where (0,0) is top-left of the wire preview image
+    if crop_rect_norm is not None:
+        nx0, ny0, nx1, ny1 = crop_rect_norm
+        # note: wire preview flips Y (DXF Y-up → image Y-down), so we un-flip
+        # ny0/ny1 are image fractions (top=0), convert back to DXF Y fractions
+        dxf_y0 = 1.0 - ny1
+        dxf_y1 = 1.0 - ny0
+        new_min_x = min_x + nx0 * span_x
+        new_max_x = min_x + nx1 * span_x
+        new_min_y = min_y + dxf_y0 * span_y
+        new_max_y = min_y + dxf_y1 * span_y
+        min_x, max_x = new_min_x, new_max_x
+        min_y, max_y = new_min_y, new_max_y
+        span_x = max_x - min_x
+        span_y = max_y - min_y
+        if span_x < 1e-9 or span_y < 1e-9:
+            return None
+
     # scale so longest axis = resolution
     scale = resolution / max(span_x, span_y)
     pad = wall_thickness * 2
@@ -280,6 +361,15 @@ def rasterize_dxf(doc, selected_layers: set[str],
         kernel = cv2.getStructuringElement(
             cv2.MORPH_ELLIPSE, (k * 2 + 1, k * 2 + 1))
         canvas_img = cv2.dilate(canvas_img, kernel, iterations=1)
+
+    # ── add padding border (black = walkable) ──
+    if padding_pct > 0:
+        h, w = canvas_img.shape
+        px = int(w * padding_pct / 100)
+        py = int(h * padding_pct / 100)
+        canvas_img = cv2.copyMakeBorder(
+            canvas_img, py, py, px, px,
+            cv2.BORDER_CONSTANT, value=0)
 
     return canvas_img   # 255 = wall, 0 = walkable
 
@@ -380,17 +470,20 @@ class RasterWorker(QThread):
     done    = pyqtSignal(object)   # numpy array or None
     error   = pyqtSignal(str)
 
-    def __init__(self, doc, layers, resolution, thickness):
+    def __init__(self, doc, layers, resolution, thickness, crop_rect_norm=None, padding_pct=5):
         super().__init__()
-        self._doc   = doc
-        self._layers  = layers
-        self._res     = resolution
-        self._thick   = thickness
+        self._doc        = doc
+        self._layers     = layers
+        self._res        = resolution
+        self._thick      = thickness
+        self._crop       = crop_rect_norm
+        self._padding    = padding_pct
 
     def run(self):
         try:
             result = rasterize_dxf(self._doc, self._layers,
-                                   self._res, self._thick)
+                                   self._res, self._thick,
+                                   self._crop, self._padding)
             self.done.emit(result)
         except Exception as e:
             self.error.emit(traceback.format_exc())
@@ -452,6 +545,9 @@ class DXFMaskMaker(QMainWindow):
         self._layer_rows: list[LayerRow] = []
         self._mask      = None      # numpy uint8 array (255=wall, 0=walkable)
         self._worker    = None
+        self._wire_layer_segs = None  # per-layer segment data for live highlight
+        self._crop_rect_norm  = None  # (x0,y0,x1,y1) normalised 0-1 or None
+        self._crop_mode       = False  # True while user is drawing a crop box
 
         self._build_ui()
 
@@ -585,7 +681,48 @@ class DXFMaskMaker(QMainWindow):
         thick_hint.setObjectName("hint"); thick_hint.setWordWrap(True)
         step3.layout().addRow(thick_hint)  # type: ignore
 
+        self._pad_spin = QSpinBox()
+        self._pad_spin.setRange(0, 30)
+        self._pad_spin.setValue(5)
+        self._pad_spin.setSuffix(" %")
+        self._pad_spin.setToolTip(
+            "Add blank black border around the final mask as a percentage of image size. "
+            "Helps watershed segmentation treat edge rooms correctly."
+        )
+        s3v.addRow("Output padding:", self._pad_spin)
+
         lv.addWidget(step3)
+
+        # ── Step 3b: crop region ──
+        step3b = self._group("Step 3b — Crop Region  (optional)")
+        s3bv = QVBoxLayout(step3b)
+
+        crop_hint = QLabel(
+            "Some DXF files have multiple floor plans or stray geometry far from the main map. "
+            "Drag a rectangle on the wire preview to restrict rasterization to just that area. "
+            "Leave blank to use the full drawing."
+        )
+        crop_hint.setObjectName("hint"); crop_hint.setWordWrap(True)
+        s3bv.addWidget(crop_hint)
+
+        self._crop_label = QLabel("No crop region set — using full drawing.")
+        self._crop_label.setObjectName("hint"); self._crop_label.setWordWrap(True)
+        s3bv.addWidget(self._crop_label)
+
+        crop_btn_row = QHBoxLayout()
+        self._crop_draw_btn = QPushButton("✏  Draw Crop Region")
+        self._crop_draw_btn.setEnabled(False)
+        self._crop_draw_btn.setToolTip("Click then drag on the wire preview to set the crop box.")
+        self._crop_draw_btn.setCheckable(True)
+        self._crop_draw_btn.clicked.connect(self._toggle_crop_mode)
+        self._crop_clear_btn = QPushButton("✕  Clear Crop")
+        self._crop_clear_btn.setEnabled(False)
+        self._crop_clear_btn.clicked.connect(self._clear_crop)
+        crop_btn_row.addWidget(self._crop_draw_btn)
+        crop_btn_row.addWidget(self._crop_clear_btn)
+        s3bv.addLayout(crop_btn_row)
+
+        lv.addWidget(step3b)
 
         # ── Step 4: generate + save ──
         step4 = self._group("Step 4 — Generate & Save")
@@ -691,12 +828,18 @@ class DXFMaskMaker(QMainWindow):
 
         self._file_label.setText(Path(path).name)
         self._file_label.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
+        self._crop_rect_norm = None
+        self._crop_label.setText("No crop region set — using full drawing.")
+        self._crop_clear_btn.setEnabled(False)
         self._populate_layers()
         self._render_wire_preview()
         self._gen_btn.setEnabled(True)
+        self._crop_draw_btn.setEnabled(True)
         self._save_btn.setEnabled(False)
         self._mask = None
         self._status.setText("")
+        # give the canvas a reference so it can call back on drag
+        self._canvas.set_crop_callback(self._on_canvas_crop)
 
     def _populate_layers(self):
         # clear old rows
@@ -720,9 +863,38 @@ class DXFMaskMaker(QMainWindow):
         for row in self._layer_rows:
             row.set_enabled(state)
 
+    def _toggle_crop_mode(self, checked):
+        self._crop_mode = checked
+        self._canvas.set_crop_mode(checked)
+        if checked:
+            self._crop_draw_btn.setText("✏  Drawing… (drag on image)")
+        else:
+            self._crop_draw_btn.setText("✏  Draw Crop Region")
+
+    def _clear_crop(self):
+        self._crop_rect_norm = None
+        self._crop_label.setText("No crop region set — using full drawing.")
+        self._crop_clear_btn.setEnabled(False)
+        self._render_wire_preview_highlighted()
+
+    def _on_canvas_crop(self, norm_rect):
+        """Called by canvas when user finishes drawing a crop rectangle."""
+        self._crop_rect_norm = norm_rect
+        x0, y0, x1, y1 = norm_rect
+        self._crop_label.setText(
+            f"Crop set: ({x0:.2f},{y0:.2f}) → ({x1:.2f},{y1:.2f})  (normalised coords)")
+        self._crop_clear_btn.setEnabled(True)
+        self._crop_draw_btn.setChecked(False)
+        self._crop_draw_btn.setText("✏  Draw Crop Region")
+        self._crop_mode = False
+        self._canvas.set_crop_mode(False)
+        self._render_wire_preview_highlighted()
+
     def _on_layer_change(self):
         n = sum(1 for r in self._layer_rows if r.enabled)
         self._status.setText(f"{n} layer(s) selected.")
+        # live-highlight selected layers in the wire preview
+        self._render_wire_preview_highlighted()
 
     # ── wire preview (shows all geometry, coloured by layer) ──
 
@@ -786,12 +958,27 @@ class DXFMaskMaker(QMainWindow):
             _draw_entity_colour(img, entity, to_px, col)
 
         self._wire_img = img
+        # also store the per-layer geometry for fast highlighted redraws
+        self._wire_layer_segs = _collect_layer_segments(
+            self._doc, min_x, min_y, span_x, span_y, WIRE_RES, pad)
         self._canvas.show_image(img)
-        self._canvas_title.setText("Wire Preview  (colours = layers)")
+        self._canvas_title.setText("Wire Preview  (colours = layers  ·  bright = selected)")
         self._mode_label.setText(
-            "Each colour is a different DXF layer. Use this to identify which layers hold walls.")
+            "Tick layers to highlight them. Drag on the image to set a crop region.")
         self._wire_btn.setEnabled(True)
         self._canvas.fit()
+
+    def _render_wire_preview_highlighted(self):
+        """Redraw wire preview: selected layers bright white, others dimmed."""
+        if self._wire_layer_segs is None or self._wire_img is None:
+            return
+        if not self._layer_rows:
+            return
+        selected = {r.name for r in self._layer_rows if r.enabled}
+        img = _draw_highlighted(self._wire_layer_segs, self._wire_img.shape,
+                                selected, self._crop_rect_norm)
+        self._canvas.show_image(img)
+        self._canvas_title.setText("Wire Preview  (bright = selected for masking)")
 
     # ── generate binary mask ──────────────────────────────────
 
@@ -810,6 +997,8 @@ class DXFMaskMaker(QMainWindow):
             self._doc, selected,
             self._res_spin.value(),
             self._thick_spin.value(),
+            self._crop_rect_norm,
+            self._pad_spin.value(),
         )
         self._worker.done.connect(self._on_raster_done)
         self._worker.error.connect(self._on_raster_error)
@@ -871,6 +1060,125 @@ class DXFMaskMaker(QMainWindow):
         cv2.imwrite(path, self._mask)
         self._status.setText(f"Saved → {Path(path).name}")
         self._status.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
+
+
+# ──────────────────────────────────────────────────────────
+#  LIVE HIGHLIGHT HELPERS
+# ──────────────────────────────────────────────────────────
+
+def _collect_layer_segments(doc, min_x, min_y, span_x, span_y, wire_res, pad):
+    """
+    Pre-collect all drawn segments per layer as lists of (p1, p2) pixel pairs.
+    Stored once after file load so layer-toggle redraws are instant.
+    """
+    scale = wire_res / max(span_x, span_y)
+    H = int(math.ceil(span_y * scale)) + pad * 2
+    W = int(math.ceil(span_x * scale)) + pad * 2
+
+    def to_px(x, y):
+        px = int((x - min_x) * scale) + pad
+        py = H - 1 - (int((y - min_y) * scale) + pad)
+        return (max(0, min(W-1, px)), max(0, min(H-1, py)))
+
+    msp = doc.modelspace()
+    layer_names = sorted(set(getattr(e.dxf, "layer", "0") for e in msp))
+    palette = [
+        (0x4f, 0x8e, 0xf7), (0x22, 0xc5, 0x5e), (0xef, 0x44, 0x44),
+        (0xf5, 0x9e, 0x0b), (0xa8, 0x5c, 0xff), (0x06, 0xb6, 0xd4),
+        (0xf9, 0x73, 0x16), (0xec, 0x48, 0x99),
+    ]
+    layer_color = {name: palette[i % len(palette)] for i, name in enumerate(layer_names)}
+
+    # segs[layer_name] = list of (p1, p2, colour_bgr)
+    segs = {name: [] for name in layer_names}
+    for entity in msp:
+        layer = getattr(entity.dxf, "layer", "0")
+        col = tuple(reversed(layer_color.get(layer, (200, 200, 200))))
+        pts = _entity_polyline_pts(entity, to_px)
+        for i in range(len(pts) - 1):
+            segs.setdefault(layer, []).append((pts[i], pts[i+1], col))
+
+    return {"segs": segs, "H": H, "W": W}
+
+
+def _entity_polyline_pts(entity, to_px):
+    """Return a list of pixel points representing the entity as a polyline."""
+    t = entity.dxftype()
+    pts = []
+    try:
+        if t == "LINE":
+            s, e = entity.dxf.start, entity.dxf.end
+            pts = [to_px(s.x, s.y), to_px(e.x, e.y)]
+        elif t == "LWPOLYLINE":
+            raw = [(v[0], v[1]) for v in entity.vertices()]
+            if entity.closed and len(raw) > 1:
+                raw.append(raw[0])
+            pts = [to_px(*p) for p in raw]
+        elif t == "POLYLINE":
+            raw = [(v.dxf.location.x, v.dxf.location.y)
+                   for v in entity.vertices if hasattr(v.dxf, "location")]
+            if bool(entity.is_closed) and len(raw) > 1:
+                raw.append(raw[0])
+            pts = [to_px(*p) for p in raw]
+        elif t == "ARC":
+            c = entity.dxf.center
+            r = entity.dxf.radius
+            cx, cy = to_px(c.x, c.y)
+            px1, _ = to_px(c.x + r, c.y)
+            pr = max(1, abs(px1 - cx))
+            start_a = -entity.dxf.end_angle
+            end_a   = -entity.dxf.start_angle
+            span = (end_a - start_a) % 360
+            n = max(8, int(span / 5))
+            for i in range(n + 1):
+                a = math.radians(start_a + span * i / n)
+                pts.append((int(cx + pr * math.cos(a)), int(cy + pr * math.sin(a))))
+        elif t == "CIRCLE":
+            c = entity.dxf.center
+            cx, cy = to_px(c.x, c.y)
+            px1, _ = to_px(c.x + entity.dxf.radius, c.y)
+            pr = max(1, abs(px1 - cx))
+            for i in range(37):
+                a = math.radians(i * 10)
+                pts.append((int(cx + pr * math.cos(a)), int(cy + pr * math.sin(a))))
+        elif t in ("SPLINE", "ELLIPSE"):
+            pts = [to_px(p[0], p[1]) for p in entity.flattening(0.5)]
+    except Exception:
+        pass
+    return pts
+
+
+def _draw_highlighted(layer_segs_data, img_shape, selected_layers, crop_rect_norm=None):
+    """
+    Draw wire preview: selected layers in bright white, others dimmed grey.
+    Also draws the crop rectangle if set.
+    """
+    if layer_segs_data is None:
+        return np.zeros(img_shape, dtype=np.uint8)
+
+    segs = layer_segs_data["segs"]
+    H    = layer_segs_data["H"]
+    W    = layer_segs_data["W"]
+    img  = np.zeros((H, W, 3), dtype=np.uint8)
+
+    for layer, seg_list in segs.items():
+        if layer in selected_layers:
+            col = (255, 255, 255)   # bright white = selected
+            thickness = 2
+        else:
+            col = (55, 55, 55)      # dim grey = not selected
+            thickness = 1
+        for p1, p2, _ in seg_list:
+            cv2.line(img, p1, p2, col, thickness)
+
+    # draw crop box overlay in bright blue
+    if crop_rect_norm is not None:
+        x0, y0, x1, y1 = crop_rect_norm
+        px0 = int(x0 * W); py0 = int(y0 * H)
+        px1 = int(x1 * W); py1 = int(y1 * H)
+        cv2.rectangle(img, (px0, py0), (px1, py1), (79, 142, 247), 2)
+
+    return img
 
 
 # ──────────────────────────────────────────────────────────

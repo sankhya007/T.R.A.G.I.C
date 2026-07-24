@@ -23,6 +23,7 @@ Built for architects and students who want to understand whether a layout is act
 T.R.A.G.I.C/
 ├── Tragic_launcher.py           # Main GUI — 3-view pipeline
 ├── predict_tiled.py             # Standalone map parser (no GUI)
+├── dxf_mask_maker.py            # dxf floorplan parser with PyQt gui
 ├── model.py                     # U-Net definition
 ├── unet.pth                     # Trained weights (auto-downloaded on first run)
 ├── zone_detector.py             # Standalone zone editor (no GUI)
@@ -94,6 +95,10 @@ WINDOW = max(WINDOW_MIN, int(math.ceil(max(pW / (n_cols_est * 0.5),
 Each patch gets a Gaussian weight map so edges blend smoothly instead of leaving hard seams.
 
 ![Map Parser view — tiling parameters on the left, stitched binary mask on the right with white walls and black walkable space](docs/view1_parser.png)
+
+#### 1.1 DXF Floorplan parsing 
+
+author here sorry for breaking the 4th wall, but because the U-net model is not that furnised and it a trial and error function meaning not all the maps are going to work consistently and there will be some problems alongside that because of the cross domain computer vision model that we are using so i am trying out a new soluton for that rather than seeing the image on itself and then predicting where the doors and the walls are we can directly input the DXF file which contains the floorplan and then see the the indivisual layers of and see which are the layers that contains the walls and the obstacles and parse them, while trying it out i have been facing some issues so that is why it is not directly  integrated in the main UI of the software, if works out it'll be added as another way in which the floorplans can be parsed and then we can continue with our process of watershed segementatiton and the simulation
 
 ---
 
