@@ -28,6 +28,8 @@ build/
 dist/
 *.spec 
 
+#dxf test files 
+dxf_plans/
 
 # Data & configs (generated)
 *_zone_config.json
