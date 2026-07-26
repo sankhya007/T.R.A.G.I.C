@@ -122,23 +122,17 @@ class ContGrid:
         self.gh  = math.ceil(wm.h / res)
         self.wm  = wm
 
-        self.walkable = np.zeros((self.gh, self.gw), dtype=bool)
-        for gy in range(self.gh):
-            for gx in range(self.gw):
-                px = min(int((gx + 0.5) * res), wm.w - 1)
-                py = min(int((gy + 0.5) * res), wm.h - 1)
-                self.walkable[gy, gx] = wm.walkable[py, px]
+        # Downsample walkable mask with a single cv2.resize call instead of
+        # two nested Python loops — same nearest-neighbour logic, much faster.
+        self.walkable = cv2.resize(
+            wm.walkable.astype(np.uint8), (self.gw, self.gh),
+            interpolation=cv2.INTER_NEAREST).astype(bool)
 
-        # hazard_zone is in full-res pixel coords — downsample the same way
-        # as the wall mask above, then carve it out of the routing grid.
-        # Same idea as SFM/RVO's "routing_walkable = walkable & ~hazard_zone".
         if hazard_zone is not None:
-            for gy in range(self.gh):
-                for gx in range(self.gw):
-                    px = min(int((gx + 0.5) * res), wm.w - 1)
-                    py = min(int((gy + 0.5) * res), wm.h - 1)
-                    if hazard_zone[py, px]:
-                        self.walkable[gy, gx] = False
+            hz_down = cv2.resize(
+                hazard_zone.astype(np.uint8), (self.gw, self.gh),
+                interpolation=cv2.INTER_NEAREST).astype(bool)
+            self.walkable &= ~hz_down
 
         self.exits = exits_px
         self.rho   = np.zeros((self.gh, self.gw), dtype=np.float32)
@@ -177,18 +171,28 @@ class ContGrid:
         self.rho[:]  = 0
         self.vavg[:] = 0
         r = max(1, CFG["density_radius"] // self.res)
-        for a in agents:
-            if a["done"]:
-                continue
-            gx, gy = self.p2g(a["x"], a["y"])
-            for dy in range(-r, r + 1):
-                for dx in range(-r, r + 1):
-                    nx, ny = gx + dx, gy + dy
-                    if 0 <= ny < self.gh and 0 <= nx < self.gw:
-                        w = max(0, 1 - (abs(dx) + abs(dy)) / (r + 1))
-                        self.rho[ny, nx] += w
-                        self.vavg[ny, nx, 0] += w * a["vx"]
-                        self.vavg[ny, nx, 1] += w * a["vy"]
+
+        # Build weight kernel once (Manhattan-distance tent, same as before)
+        ky, kx = np.mgrid[-r:r+1, -r:r+1]
+        kernel = np.maximum(0, 1 - (np.abs(ky) + np.abs(kx)) / (r + 1)).astype(np.float32)
+
+        active = [(a["x"], a["y"], a["vx"], a["vy"]) for a in agents if not a["done"]]
+        if not active:
+            return
+
+        for ax, ay, avx, avy in active:
+            gx, gy = self.p2g(ax, ay)
+            # grid-cell range clipped to array bounds
+            y0, y1 = max(0, gy - r), min(self.gh, gy + r + 1)
+            x0, x1 = max(0, gx - r), min(self.gw, gx + r + 1)
+            # corresponding kernel slice
+            ky0, ky1 = y0 - (gy - r), y1 - (gy - r)
+            kx0, kx1 = x0 - (gx - r), x1 - (gx - r)
+            w = kernel[ky0:ky1, kx0:kx1]
+            self.rho[y0:y1, x0:x1]       += w
+            self.vavg[y0:y1, x0:x1, 0]   += w * avx
+            self.vavg[y0:y1, x0:x1, 1]   += w * avy
+
         m = self.rho > 0
         self.vavg[m, 0] /= self.rho[m]
         self.vavg[m, 1] /= self.rho[m]
@@ -499,15 +503,21 @@ def main():
             elif wm.walkable[int(ag["y"]), int(nx_)]: ag["x"] = nx_; ag["vy"] *= 0.5
             elif wm.walkable[int(ny_), int(ag["x"])]: ag["y"] = ny_; ag["vx"] *= 0.5
 
-            ag["trail"].append((ag["x"], ag["y"]))
+            if step % 4 == 0:  # trail thinning — every 4th tick
+                ag["trail"].append((ag["x"], ag["y"]))
 
             cx_ = int(ag["x"]); cy_ = int(ag["y"])
             congestion_map[cy_, cx_] += DT
 
-            pos   = np.array([ag["x"], ag["y"]])
-            dists = np.linalg.norm(exits_arr - pos, axis=1)
-            nearest = int(np.argmin(dists))
-            if dists[nearest] < EXIT_R:
+            # exit check — scalar math, no per-agent numpy allocation
+            ax2, ay2 = ag["x"], ag["y"]
+            er2 = EXIT_R * EXIT_R
+            nearest, best_d2 = 0, float("inf")
+            for ei, (ex, ey) in enumerate(exits_px):
+                d2 = (ax2 - ex)**2 + (ay2 - ey)**2
+                if d2 < best_d2:
+                    best_d2, nearest = d2, ei
+            if best_d2 < er2:
                 ag["done"]      = True
                 ag["time"]      = sim_time
                 ag["exit_used"] = nearest
