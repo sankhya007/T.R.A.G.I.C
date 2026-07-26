@@ -1355,8 +1355,6 @@ class View2_ZoneEditor(QWidget):
         return l
 
     def on_enter(self):
-        """Called when this view becomes active. Only auto-load the mask if nothing is loaded yet.
-        If the user already has zones/densities set up, don't reset them."""
         if self.binary is None and self.state.mask_path and Path(self.state.mask_path).exists():
             self._load_mask_from_path(self.state.mask_path)
             self.auto_load_label.setText(f"Auto-loaded: {Path(self.state.mask_path).name}")
@@ -1398,17 +1396,16 @@ class View2_ZoneEditor(QWidget):
 
         dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
         dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-        # Scale min_distance with image size so large DXF masks don't over-partition
-        h_img, w_img = binary.shape
-        min_dist = max(20, int(max(h_img, w_img) / 40))
-        coords = peak_local_max(dist_norm, min_distance=min_dist, labels=binary)
+        # Must match the hardcoded min_distance=40 used in all four sim scripts
+        # so that zone IDs produced here are the same ones the sim scripts produce
+        coords = peak_local_max(dist_norm, min_distance=40, labels=binary)
         seed_mask = np.zeros(dist_norm.shape, dtype=bool)
         seed_mask[tuple(coords.T)] = True
         markers, _ = ndi.label(seed_mask)
         labels = watershed(-dist, markers, mask=binary)
 
-        # Scale min zone area with image size
-        min_area = max(200, int(h_img * w_img * 0.0005))
+        h_img, w_img = binary.shape
+        min_area = 800  # matches the original zone_detector.py threshold
         valid_zones, zone_stats = [], {}
         for zid in np.unique(labels):
             if zid == 0:
