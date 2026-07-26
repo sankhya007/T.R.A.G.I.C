@@ -39,6 +39,7 @@ CONFIG = {
 # 8-connected Moore neighbourhood — cardinal first, then diagonal
 DIRS  = [(0,-1),(0,1),(-1,0),(1,0), (-1,-1),(-1,1),(1,-1),(1,1)]
 DCOST = [  1.0,  1.0,  1.0,  1.0,    1.41,   1.41,  1.41,  1.41]
+DIRS_IDX = {d: i for i, d in enumerate(DIRS)}  # O(1) lookup, avoids list.index() in inner loop
 
 np.random.seed(42)
 
@@ -200,7 +201,6 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg,
     randomness     = cfg["randomness"]
     exit_radius    = cfg["exit_radius"]
     H, W           = walkable.shape
-    exit_pts       = np.array([[e["x"], e["y"]] for e in exits_cfg], dtype=np.float32)
     density_map    = np.zeros((H, W), dtype=np.float32)
     congestion_map = np.zeros((H, W), dtype=np.float32)
     MAX_TICKS      = int(max_time / dt)
@@ -235,11 +235,14 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg,
         for agent in active:
             x, y = agent["x"], agent["y"]
 
-            # Exit check before movement
-            pos     = np.array([float(x), float(y)], dtype=np.float32)
-            dists   = np.linalg.norm(exit_pts - pos, axis=1)
-            nearest = int(np.argmin(dists))
-            if dists[nearest] < exit_radius or exit_zone[y, x]:
+            # Exit check before movement — scalar math, no allocation
+            er2 = exit_radius * exit_radius
+            nearest, best_d2 = 0, float("inf")
+            for ei, e in enumerate(exits_cfg):
+                d2 = (x - e["x"])**2 + (y - e["y"])**2
+                if d2 < best_d2:
+                    best_d2, nearest = d2, ei
+            if best_d2 < er2 or exit_zone[y, x]:
                 agent["evacuated"] = True
                 agent["time"]      = sim_time
                 agent["exit_used"] = nearest
@@ -286,13 +289,15 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg,
                             agent["x"], agent["y"] = nx, ny
                             if not exit_zone[ny, nx]:
                                 occupied[ny, nx] = True
-                            agent["trail"].append((nx, ny))
+                            if tick % 5 == 0:
+                                agent["trail"].append((nx, ny))
                             density_map[ny, nx]    += 1
                             congestion_map[ny, nx] += dt
                             continue
                 congestion_map[y, x] += dt
                 density_map[y, x]    += 1
-                agent["trail"].append((x, y))
+                if tick % 5 == 0:
+                    agent["trail"].append((x, y))
                 continue
 
             cands.sort()
@@ -308,7 +313,7 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg,
                 best_nx = best_ny = -1
                 best_nc = cc
 
-                ordered = [(dx, dy, DCOST[DIRS.index((dx, dy))])]
+                ordered = [(dx, dy, DCOST[DIRS_IDX[(dx, dy)]])]
                 for i2, (ddx, ddy) in enumerate(DIRS):
                     if (ddx, ddy) != (dx, dy):
                         ordered.append((ddx, ddy, DCOST[i2]))
@@ -337,11 +342,13 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg,
                 if not exit_zone[cur_y, cur_x]:
                     occupied[cur_y, cur_x] = True
 
-                # Mid-step exit check
-                pos2   = np.array([float(cur_x), float(cur_y)], dtype=np.float32)
-                dists2 = np.linalg.norm(exit_pts - pos2, axis=1)
-                n2     = int(np.argmin(dists2))
-                if dists2[n2] < exit_radius or exit_zone[cur_y, cur_x]:
+                # Mid-step exit check — scalar math, no allocation
+                n2, best_d2b = 0, float("inf")
+                for ei, e in enumerate(exits_cfg):
+                    d2 = (cur_x - e["x"])**2 + (cur_y - e["y"])**2
+                    if d2 < best_d2b:
+                        best_d2b, n2 = d2, ei
+                if best_d2b < er2 or exit_zone[cur_y, cur_x]:
                     agent["evacuated"] = True
                     agent["time"]      = sim_time
                     agent["exit_used"] = n2
@@ -350,7 +357,8 @@ def run_simulation(agents, occupied, cost, exit_zone, walkable, exits_cfg, cfg,
                     break
 
             agent["x"], agent["y"] = cur_x, cur_y
-            agent["trail"].append((cur_x, cur_y))
+            if tick % 5 == 0:
+                agent["trail"].append((cur_x, cur_y))
             density_map[cur_y, cur_x]    += 1
             congestion_map[cur_y, cur_x] += dt
 
