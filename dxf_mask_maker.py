@@ -423,6 +423,47 @@ def rasterize_dxf(doc, selected_layers: set[str],
     return canvas_img   # 255 = wall, 0 = walkable
 
 
+def auto_fill_hollow_walls(mask: np.ndarray, min_hole_px: int = 4, max_hole_px: int = 800) -> np.ndarray:
+    """
+    Auto-fill small enclosed black regions that are surrounded by white walls.
+    This fixes the hollow double-line wall problem without needing manual clicks.
+
+    Strategy: flood-fill from the image border to find all "outside" space,
+    then any remaining black region that was NOT reachable from the border
+    and is smaller than max_hole_px is interior wall cavity → fill it white.
+
+    min_hole_px: ignore cavities smaller than this (noise)
+    max_hole_px: don't fill cavities larger than this (they're real rooms)
+    """
+    h, w = mask.shape
+    # flood-fill from border with a temp value (128) to mark all exterior walkable space
+    temp = mask.copy()
+    flood_seed = np.zeros((h + 2, w + 2), dtype=np.uint8)
+    # fill from all 4 edges
+    for x in range(w):
+        if temp[0, x] == 0:
+            cv2.floodFill(temp, flood_seed, (x, 0), 128)
+        if temp[h - 1, x] == 0:
+            cv2.floodFill(temp, flood_seed, (x, h - 1), 128)
+    for y in range(h):
+        if temp[y, 0] == 0:
+            cv2.floodFill(temp, flood_seed, (0, y), 128)
+        if temp[y, w - 1] == 0:
+            cv2.floodFill(temp, flood_seed, (w - 1, y), 128)
+
+    # any pixel still == 0 is enclosed black → check its connected component size
+    enclosed = (temp == 0).astype(np.uint8)
+    n_labels, label_img, stats, _ = cv2.connectedComponentsWithStats(enclosed, connectivity=4)
+
+    result = mask.copy()
+    for lbl in range(1, n_labels):
+        area = stats[lbl, cv2.CC_STAT_AREA]
+        if min_hole_px <= area <= max_hole_px:
+            result[label_img == lbl] = 255   # fill it white (wall)
+
+    return result
+
+
 def _entity_points(entity) -> list[tuple[float, float]]:
     """Extract a rough bounding sample of points from an entity."""
     t = entity.dxftype()
@@ -784,6 +825,14 @@ class DXFMaskMaker(QMainWindow):
         )
         gen_hint.setObjectName("hint"); gen_hint.setWordWrap(True)
         s4v.addWidget(gen_hint)
+
+        self._auto_fill_cb = QCheckBox("Auto-fill hollow walls (double-line CAD walls)")
+        self._auto_fill_cb.setChecked(True)
+        self._auto_fill_cb.setToolTip(
+            "Automatically fills small enclosed black regions surrounded by white walls.\n"
+            "This fixes the hollow double-line wall problem.\n"
+            "Uncheck if you want rooms to stay open after rasterizing.")
+        s4v.addWidget(self._auto_fill_cb)
 
         self._gen_btn = QPushButton("▶  Generate Preview")
         self._gen_btn.setObjectName("primary")
@@ -1165,6 +1214,12 @@ class DXFMaskMaker(QMainWindow):
         if result is None:
             self._status.setText("No geometry found on selected layers.")
             return
+        # Auto-fill hollow walls (double-line CAD walls) if checkbox is on
+        if self._auto_fill_cb.isChecked():
+            # max_hole_px: scale with image area so real rooms are never filled
+            h_r, w_r = result.shape
+            max_hole = max(200, int(h_r * w_r * 0.0002))  # ~0.02% of image area
+            result = auto_fill_hollow_walls(result, min_hole_px=4, max_hole_px=max_hole)
         self._mask = result
         self._fill_history = []          # new mask — clear undo history
         self._fill_undo_btn.setEnabled(False)

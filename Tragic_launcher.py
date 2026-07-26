@@ -1164,11 +1164,11 @@ class View2_ZoneEditor(QWidget):
 
         density_form = QFormLayout()
         self.base_spin = QDoubleSpinBox()
-        self.base_spin.setRange(0.1, 20.0)
-        self.base_spin.setValue(1.0)
-        self.base_spin.setSingleStep(0.1)
-        self.base_spin.setDecimals(1)
-        self.base_spin.setToolTip("Agents per 1000px² at density index = 1")
+        self.base_spin.setRange(0.01, 20.0)
+        self.base_spin.setValue(0.5)
+        self.base_spin.setSingleStep(0.05)
+        self.base_spin.setDecimals(2)
+        self.base_spin.setToolTip("Agents per 1000px² at density index = 1. Use small values (0.1–0.5) for large DXF masks.")
         density_form.addRow("Agents / 1000px²:", self.base_spin)
         lv.addLayout(density_form)
 
@@ -1355,8 +1355,9 @@ class View2_ZoneEditor(QWidget):
         return l
 
     def on_enter(self):
-        """Called when this view becomes active. Always reload from disk so edits made in View 1 are picked up."""
-        if self.state.mask_path and Path(self.state.mask_path).exists():
+        """Called when this view becomes active. Only auto-load the mask if nothing is loaded yet.
+        If the user already has zones/densities set up, don't reset them."""
+        if self.binary is None and self.state.mask_path and Path(self.state.mask_path).exists():
             self._load_mask_from_path(self.state.mask_path)
             self.auto_load_label.setText(f"Auto-loaded: {Path(self.state.mask_path).name}")
 
@@ -1397,18 +1398,23 @@ class View2_ZoneEditor(QWidget):
 
         dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
         dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-        coords = peak_local_max(dist_norm, min_distance=40, labels=binary)
+        # Scale min_distance with image size so large DXF masks don't over-partition
+        h_img, w_img = binary.shape
+        min_dist = max(20, int(max(h_img, w_img) / 40))
+        coords = peak_local_max(dist_norm, min_distance=min_dist, labels=binary)
         seed_mask = np.zeros(dist_norm.shape, dtype=bool)
         seed_mask[tuple(coords.T)] = True
         markers, _ = ndi.label(seed_mask)
         labels = watershed(-dist, markers, mask=binary)
 
+        # Scale min zone area with image size
+        min_area = max(200, int(h_img * w_img * 0.0005))
         valid_zones, zone_stats = [], {}
         for zid in np.unique(labels):
             if zid == 0:
                 continue
             area = int(np.sum(labels == zid))
-            if area >= 800:
+            if area >= min_area:
                 valid_zones.append(int(zid))
                 zone_stats[int(zid)] = area
 
@@ -1420,6 +1426,10 @@ class View2_ZoneEditor(QWidget):
         self.density_map = {zid: 1.0 for zid in valid_zones}
         self.highlight = None
         self.highlight_set = set()
+
+        # Build and cache the base zone image once — _refresh_map copies it instead of recomputing
+        self._base_zone_img = self._build_base_zone_img()
+
         self.zone_info.setText(f"{len(valid_zones)} zones detected.\nClick any zone to set its density.")
         self._refresh_map()
         
@@ -1464,12 +1474,16 @@ class View2_ZoneEditor(QWidget):
 
         # Now populate config data into the UI
         self.base_spin.setValue(config.get("base_density", 1.0))
-        self.density_map = {}
+        # Default all zones to 0 — only set density for zones explicitly listed in config
+        self.density_map = {zid: 0.0 for zid in self.valid_zones}
         for zone_data in config.get("zones", []):
             zid = zone_data.get("zone_id")
-            d = zone_data.get("density_index", 1.0)
+            d = zone_data.get("density_index", 0.0)
             if zid in self.valid_zones:
                 self.density_map[zid] = d
+
+        # Rebuild base image now that density_map is correct
+        self._base_zone_img = self._build_base_zone_img()
 
         self.exits = config.get("exits", [])
         self.hazard = config.get("hazard", None)
@@ -1484,6 +1498,27 @@ class View2_ZoneEditor(QWidget):
         self.auto_load_label.setText(f"Loaded: {Path(path).name}")
         self.proceed_btn.setEnabled(True)
 
+    def _build_base_zone_img(self):
+        """Build the full-res coloured zone image once. Called at load time and when density changes."""
+        if self.binary is None:
+            return None
+        h, w = self.binary.shape
+        rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        for zid in self.valid_zones:
+            d = self.density_map.get(zid, 1.0)
+            rgb[self.labels == zid] = (80, 80, 80) if d == 0 else self.color_map[zid]
+        rgb[self.binary == 0] = (20, 20, 20)
+        # Draw zone labels (centroid text) into the base image
+        for i, zid in enumerate(self.valid_zones):
+            ys, xs = np.where(self.labels == zid)
+            if len(xs) == 0:
+                continue
+            cx, cy = int(xs.mean()), int(ys.mean())
+            d = self.density_map.get(zid, 1.0)
+            cv2.putText(rgb, f"{i}:{d:.1f}", (cx - 15, cy + 5),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+        return rgb
+
     def _build_colors(self, zones):
         colors = {}
         for i, zid in enumerate(zones):
@@ -1497,46 +1532,46 @@ class View2_ZoneEditor(QWidget):
         if self.binary is None:
             return
         h, w = self.binary.shape
-        rgb = np.zeros((h, w, 3), dtype=np.uint8)
 
-        for zid in self.valid_zones:
-            d = self.density_map.get(zid, 1.0)
-            rgb[self.labels == zid] = (80, 80, 80) if d == 0 else self.color_map[zid]
-        rgb[self.binary == 0] = (20, 20, 20)
+        # Use cached base image — copy it so we can draw overlays without dirtying the cache
+        base = getattr(self, '_base_zone_img', None)
+        if base is None:
+            base = self._build_base_zone_img()
+            self._base_zone_img = base
+        rgb = base.copy()
 
+        # Marker size scales with image so they're visible on big DXF masks
+        marker_r = max(10, int(max(h, w) / 80))
+        font_scale = max(0.4, marker_r / 25)
+        text_off = max(8, marker_r // 2)
+
+        # Selection outlines
         if self.highlight is not None:
             zm = (self.labels == self.highlight).astype(np.uint8) * 255
             contours, _ = cv2.findContours(zm, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(rgb, contours, -1, (255, 255, 0), 3)
+            cv2.drawContours(rgb, contours, -1, (255, 255, 0), max(2, marker_r // 5))
         for sel_zid in self.highlight_set:
             if sel_zid != self.highlight:
                 zm2 = (self.labels == sel_zid).astype(np.uint8) * 255
                 c2, _ = cv2.findContours(zm2, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                cv2.drawContours(rgb, c2, -1, (255, 165, 0), 2)
+                cv2.drawContours(rgb, c2, -1, (255, 165, 0), max(2, marker_r // 6))
 
-        for i, zid in enumerate(self.valid_zones):
-            ys, xs = np.where(self.labels == zid)
-            if len(xs) == 0:
-                continue
-            cx, cy = int(xs.mean()), int(ys.mean())
-            d = self.density_map.get(zid, 1.0)
-            cv2.putText(rgb, f"{i}:{d:.1f}", (cx - 15, cy + 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
-            
         # Draw exits
         for i, ex in enumerate(self.exits):
-            cv2.circle(rgb, (int(ex["x"]), int(ex["y"])), 18, (0, 220, 80), -1)
-            cv2.putText(rgb, f"E{i+1}", (int(ex["x"]) - 12, int(ex["y"]) + 6),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 1)
+            ex_x, ex_y = int(ex["x"]), int(ex["y"])
+            cv2.circle(rgb, (ex_x, ex_y), marker_r, (0, 220, 80), -1)
+            cv2.putText(rgb, f"E{i+1}", (ex_x - text_off, ex_y + text_off // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), max(1, marker_r // 10))
 
-        # Draw hazard
+        # Draw hazard — scale the no-go radius circle to image size too
         if self.hazard:
             hx, hy = int(self.hazard["x"]), int(self.hazard["y"])
-            cv2.circle(rgb, (hx, hy), HAZARD_BLOCK_RADIUS, (0, 140, 255), 2)  # actual no-go zone
-            cv2.circle(rgb, (hx, hy), 18, (0, 0, 255), -1)
-            cv2.circle(rgb, (hx, hy), 21, (0, 0, 200), 3)
-            cv2.putText(rgb, "H", (hx - 7, hy + 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            hazard_display_r = max(30, int(max(h, w) * HAZARD_BLOCK_RADIUS / 1000))
+            cv2.circle(rgb, (hx, hy), hazard_display_r, (0, 140, 255), max(2, marker_r // 8))
+            cv2.circle(rgb, (hx, hy), marker_r, (0, 0, 255), -1)
+            cv2.circle(rgb, (hx, hy), marker_r + 3, (0, 0, 200), max(2, marker_r // 8))
+            cv2.putText(rgb, "H", (hx - text_off // 2, hy + text_off // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), max(1, marker_r // 8))
 
         qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg)
@@ -1622,6 +1657,8 @@ class View2_ZoneEditor(QWidget):
         if self.highlight is not None:
             self._map_click_refresh()
         self._rebuild_zone_list()
+        # Density changed → rebuild cached base image
+        self._base_zone_img = self._build_base_zone_img()
         self._refresh_map()
 
     def _map_click_refresh(self):
@@ -1755,7 +1792,7 @@ class View2_ZoneEditor(QWidget):
         }
         for i, zid in enumerate(self.valid_zones):
             area = int(self.zone_stats[zid])
-            d = float(self.density_map.get(zid, 1.0))
+            d = float(self.density_map.get(zid, 0.0))
             agents = int(area * d * float(self.base_spin.value()) / 1000)
             config["zones"].append({
                 "zone_index": int(i),
