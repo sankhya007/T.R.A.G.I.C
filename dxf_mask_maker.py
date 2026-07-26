@@ -169,6 +169,13 @@ class Canvas(QGraphicsView):
         self._crop_callback = None
         self._drag_start    = None   # QPointF in scene coords
         self._crop_overlay  = None   # QGraphicsRectItem
+        # fill-hole mode state
+        self._fill_mode     = False
+        self._fill_callback = None   # called with (pixel_x, pixel_y) on click
+        # track whether we've done the initial fit for the current image
+        self._fitted        = False
+        # show open-hand cursor so it's obvious the canvas is draggable
+        self.setCursor(Qt.CursorShape.OpenHandCursor)
 
     def set_crop_callback(self, fn):
         self._crop_callback = fn
@@ -176,16 +183,38 @@ class Canvas(QGraphicsView):
     def set_crop_mode(self, active: bool):
         self._crop_mode = active
         if active:
+            self._fill_mode = False   # mutually exclusive
             self.setDragMode(QGraphicsView.DragMode.NoDrag)
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
             if self._crop_overlay:
                 self._scene.removeItem(self._crop_overlay)
                 self._crop_overlay = None
 
+    def set_fill_callback(self, fn):
+        self._fill_callback = fn
+
+    def set_fill_mode(self, active: bool):
+        self._fill_mode = active
+        if active:
+            self._crop_mode = False   # mutually exclusive
+            self.setDragMode(QGraphicsView.DragMode.NoDrag)
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+        else:
+            self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+
     def mousePressEvent(self, event):
+        if self._fill_mode and self._item is not None:
+            # map click to image pixel coordinates
+            scene_pt = self.mapToScene(event.pos())
+            px = int(scene_pt.x())
+            py = int(scene_pt.y())
+            if self._fill_callback:
+                self._fill_callback(px, py)
+            return
         if self._crop_mode and self._item is not None:
             self._drag_start = self.mapToScene(event.pos())
             if self._crop_overlay:
@@ -197,6 +226,9 @@ class Canvas(QGraphicsView):
                 QPen(QColor("#4f8ef7"), 2),
                 QBrush(QColor(79, 142, 247, 40)))
             return
+        # normal pan mode — show closed hand while dragging
+        if not self._crop_mode and not self._fill_mode:
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
@@ -222,10 +254,17 @@ class Canvas(QGraphicsView):
                 if self._crop_callback:
                     self._crop_callback((x0, y0, x1, y1))
             return
+        # restore open hand after pan drag ends
+        if not self._crop_mode and not self._fill_mode:
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
         super().mouseReleaseEvent(event)
 
-    def show_image(self, img_bgr: np.ndarray):
-        """Feed an OpenCV BGR or single-channel image to the canvas."""
+    def show_image(self, img_bgr: np.ndarray, reset_view: bool = False):
+        """Feed an OpenCV BGR or single-channel image to the canvas.
+
+        reset_view=True  → fit the whole image into view (use when loading a brand-new image).
+        reset_view=False → swap the pixmap in-place, keeping the current zoom/pan position.
+        """
         if img_bgr.ndim == 2:
             h, w = img_bgr.shape
             qimg = QImage(img_bgr.tobytes(), w, h, w, QImage.Format.Format_Grayscale8)
@@ -235,11 +274,21 @@ class Canvas(QGraphicsView):
             qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
 
         pix = QPixmap.fromImage(qimg)
-        self._scene.clear()
-        self._item = QGraphicsPixmapItem(pix)
-        self._scene.addItem(self._item)
-        self._scene.setSceneRect(QRectF(pix.rect()))
-        self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+        if self._item is None or reset_view:
+            # First load (or explicit reset) — rebuild the scene from scratch
+            self._scene.clear()
+            self._item = QGraphicsPixmapItem(pix)
+            self._item.setPos(0, 0)
+            self._scene.addItem(self._item)
+            self._scene.setSceneRect(0, 0, pix.width(), pix.height())
+            self.fitInView(self._scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+            self._fitted = True
+        else:
+            # Same logical image (e.g. layer highlight update) — just swap the pixmap.
+            # This keeps the current zoom level and pan position intact.
+            self._item.setPixmap(pix)
+            self._scene.setSceneRect(0, 0, pix.width(), pix.height())
 
     def fit(self):
         if self._item:
@@ -548,6 +597,7 @@ class DXFMaskMaker(QMainWindow):
         self._wire_layer_segs = None  # per-layer segment data for live highlight
         self._crop_rect_norm  = None  # (x0,y0,x1,y1) normalised 0-1 or None
         self._crop_mode       = False  # True while user is drawing a crop box
+        self._fill_mode       = False  # True while user is clicking to fill holes
 
         self._build_ui()
 
@@ -752,6 +802,40 @@ class DXFMaskMaker(QMainWindow):
         s4v.addWidget(self._save_btn)
 
         lv.addWidget(step4)
+
+        # ── Step 4b: fill hollow walls ──
+        step4b = self._group("Step 4b — Fill Hollow Walls  (optional)")
+        s4bv = QVBoxLayout(step4b)
+
+        fill_hint = QLabel(
+            "Double-line walls leave a hollow cavity inside them that reads as walkable. "
+            "Enable Fill Mode, then click inside any white-bordered hollow on the mask "
+            "to flood-fill it solid white (wall).\n\n"
+            "Zoom in first so you can see the cavity clearly. "
+            "Click Undo Last Fill to reverse the most recent fill."
+        )
+        fill_hint.setObjectName("hint"); fill_hint.setWordWrap(True)
+        s4bv.addWidget(fill_hint)
+
+        self._fill_btn = QPushButton("🪣  Enable Fill Mode")
+        self._fill_btn.setCheckable(True)
+        self._fill_btn.setEnabled(False)
+        self._fill_btn.setToolTip(
+            "Click a hollow region inside a wall to fill it solid white.\n"
+            "Scroll/drag to navigate. Click again to disable Fill Mode.")
+        self._fill_btn.clicked.connect(self._toggle_fill_mode)
+        s4bv.addWidget(self._fill_btn)
+
+        self._fill_undo_btn = QPushButton("↩  Undo Last Fill")
+        self._fill_undo_btn.setEnabled(False)
+        self._fill_undo_btn.clicked.connect(self._undo_fill)
+        s4bv.addWidget(self._fill_undo_btn)
+
+        self._fill_status = QLabel("")
+        self._fill_status.setObjectName("hint"); self._fill_status.setWordWrap(True)
+        s4bv.addWidget(self._fill_status)
+
+        lv.addWidget(step4b)
         lv.addStretch()
 
         left_scroll.setWidget(left)
@@ -837,9 +921,15 @@ class DXFMaskMaker(QMainWindow):
         self._crop_draw_btn.setEnabled(True)
         self._save_btn.setEnabled(False)
         self._mask = None
+        self._fill_history = []   # stack of mask snapshots for undo
         self._status.setText("")
-        # give the canvas a reference so it can call back on drag
+        self._fill_status.setText("")
+        self._fill_btn.setEnabled(False)
+        self._fill_btn.setChecked(False)
+        self._fill_undo_btn.setEnabled(False)
+        # give the canvas references so it can call back on drag/click
         self._canvas.set_crop_callback(self._on_canvas_crop)
+        self._canvas.set_fill_callback(self._on_canvas_fill)
 
     def _populate_layers(self):
         # clear old rows
@@ -867,9 +957,76 @@ class DXFMaskMaker(QMainWindow):
         self._crop_mode = checked
         self._canvas.set_crop_mode(checked)
         if checked:
+            # turn off fill mode if it was on
+            self._fill_mode = False
+            self._fill_btn.setChecked(False)
+            self._canvas.set_fill_mode(False)
+            self._fill_btn.setText("🪣  Enable Fill Mode")
             self._crop_draw_btn.setText("✏  Drawing… (drag on image)")
         else:
             self._crop_draw_btn.setText("✏  Draw Crop Region")
+
+    def _toggle_fill_mode(self, checked):
+        self._fill_mode = checked
+        self._canvas.set_fill_mode(checked)
+        if checked:
+            # turn off crop mode if it was on
+            self._crop_mode = False
+            self._crop_draw_btn.setChecked(False)
+            self._canvas.set_crop_mode(False)
+            self._crop_draw_btn.setText("✏  Draw Crop Region")
+            self._fill_btn.setText("🪣  Fill Mode ON  (click a hollow)")
+            self._fill_status.setText("Click inside any hollow wall cavity to fill it solid white.")
+            self._fill_status.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
+        else:
+            self._fill_btn.setText("🪣  Enable Fill Mode")
+            self._fill_status.setText("")
+
+    def _on_canvas_fill(self, px: int, py: int):
+        """Flood-fill the clicked pixel to white (wall) on the mask."""
+        if self._mask is None:
+            return
+        h, w = self._mask.shape
+        if px < 0 or py < 0 or px >= w or py >= h:
+            return
+
+        # only fill if the clicked pixel is black (walkable) — ignore wall clicks
+        if self._mask[py, px] != 0:
+            self._fill_status.setText("Clicked on an existing wall — click inside a hollow black region.")
+            self._fill_status.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
+            return
+
+        # save snapshot for undo before modifying
+        self._fill_history.append(self._mask.copy())
+        self._fill_undo_btn.setEnabled(True)
+
+        # flood fill from the clicked pixel, setting it to white (255)
+        # cv2.floodFill works on a copy and needs a mask 2px bigger
+        flood_mask = np.zeros((h + 2, w + 2), dtype=np.uint8)
+        filled = self._mask.copy()
+        cv2.floodFill(filled, flood_mask, (px, py), 255)
+
+        # count how many pixels changed so we can report it
+        filled_count = int(np.sum((filled == 255) & (self._mask == 0)))
+
+        self._mask = filled
+        self._canvas.show_image(self._mask, reset_view=False)  # keep zoom position
+
+        self._fill_status.setText(
+            f"Filled {filled_count:,} pixels at ({px}, {py}).  "
+            f"Total fills: {len(self._fill_history)}")
+        self._fill_status.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
+
+    def _undo_fill(self):
+        if not self._fill_history:
+            return
+        self._mask = self._fill_history.pop()
+        self._canvas.show_image(self._mask, reset_view=False)
+        self._fill_undo_btn.setEnabled(bool(self._fill_history))
+        n = len(self._fill_history)
+        self._fill_status.setText(
+            f"Undone.  {n} fill{'s' if n != 1 else ''} remaining.")
+        self._fill_status.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
 
     def _clear_crop(self):
         self._crop_rect_norm = None
@@ -961,12 +1118,11 @@ class DXFMaskMaker(QMainWindow):
         # also store the per-layer geometry for fast highlighted redraws
         self._wire_layer_segs = _collect_layer_segments(
             self._doc, min_x, min_y, span_x, span_y, WIRE_RES, pad)
-        self._canvas.show_image(img)
+        self._canvas.show_image(img, reset_view=True)   # new file → fit to view
         self._canvas_title.setText("Wire Preview  (colours = layers  ·  bright = selected)")
         self._mode_label.setText(
             "Tick layers to highlight them. Drag on the image to set a crop region.")
         self._wire_btn.setEnabled(True)
-        self._canvas.fit()
 
     def _render_wire_preview_highlighted(self):
         """Redraw wire preview: selected layers bright white, others dimmed."""
@@ -977,7 +1133,7 @@ class DXFMaskMaker(QMainWindow):
         selected = {r.name for r in self._layer_rows if r.enabled}
         img = _draw_highlighted(self._wire_layer_segs, self._wire_img.shape,
                                 selected, self._crop_rect_norm)
-        self._canvas.show_image(img)
+        self._canvas.show_image(img, reset_view=False)  # keep current zoom/pan
         self._canvas_title.setText("Wire Preview  (bright = selected for masking)")
 
     # ── generate binary mask ──────────────────────────────────
@@ -1010,7 +1166,11 @@ class DXFMaskMaker(QMainWindow):
             self._status.setText("No geometry found on selected layers.")
             return
         self._mask = result
-        self._canvas.show_image(result)
+        self._fill_history = []          # new mask — clear undo history
+        self._fill_undo_btn.setEnabled(False)
+        self._fill_btn.setEnabled(True)
+        self._fill_status.setText("")
+        self._canvas.show_image(result, reset_view=True)   # new image → fit to view
         self._canvas_title.setText("Binary Mask  (white = wall  ·  black = walkable)")
         self._mode_label.setText("")
         self._mask_btn.setEnabled(True)
@@ -1022,7 +1182,6 @@ class DXFMaskMaker(QMainWindow):
             "Save it as stitched_mask.png and open it in TRAGIC's Zone Editor."
         )
         self._status.setStyleSheet(f"color: {DARK['success']}; font-size: 9pt;")
-        self._canvas.fit()
 
     def _on_raster_error(self, msg):
         self._gen_btn.setEnabled(True)
@@ -1034,18 +1193,16 @@ class DXFMaskMaker(QMainWindow):
 
     def _show_wire(self):
         if self._wire_img is not None:
-            self._canvas.show_image(self._wire_img)
+            self._canvas.show_image(self._wire_img, reset_view=True)
             self._canvas_title.setText("Wire Preview  (colours = layers)")
             self._mode_label.setText(
                 "Each colour is a different DXF layer. Use this to identify which layers hold walls.")
-            self._canvas.fit()
 
     def _show_mask_view(self):
         if self._mask is not None:
-            self._canvas.show_image(self._mask)
+            self._canvas.show_image(self._mask, reset_view=True)
             self._canvas_title.setText("Binary Mask  (white = wall  ·  black = walkable)")
             self._mode_label.setText("")
-            self._canvas.fit()
 
     # ── save ──────────────────────────────────────────────────
 
