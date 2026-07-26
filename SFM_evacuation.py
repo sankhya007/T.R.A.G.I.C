@@ -287,16 +287,30 @@ for step in range(total_steps):
             ex_dir[stuck_other, 1] = np.sin(rand_a)
     f_drive = (DESIRED_SPEED * ex_dir - vel) / RELAXATION_TIME
 
-    # Force 2: Agent-agent repulsion — vectorized pairwise computation
-    # (replaces the old O(N^2) Python double loop with one NumPy pass).
-    diff  = pos[:, None, :] - pos[None, :, :]                  # (n, n, 2)
-    dist  = np.sqrt((diff**2).sum(axis=2))                     # (n, n)
-    np.fill_diagonal(dist, np.inf)
-    in_range = dist < AGENT_RADIUS * 6
-    safe_dist = np.where(dist < 1e-3, 1e-3, dist)
-    mag = AA_STRENGTH * np.exp((AGENT_RADIUS * 2 - safe_dist) / AA_RANGE)
-    mag = np.where(in_range, mag, 0.0)
-    f_agent = (mag[:, :, None] * diff / safe_dist[:, :, None]).sum(axis=1)
+    # Force 2: Agent-agent repulsion — spatial hash, O(N) in practice.
+    # Agents only interact with others in the same or adjacent cells.
+    CELL = int(AGENT_RADIUS * 6)  # bucket size = interaction range
+    bucket = {}
+    for i, p in enumerate(pos):
+        key = (int(p[0]) // CELL, int(p[1]) // CELL)
+        bucket.setdefault(key, []).append(i)
+
+    f_agent = np.zeros_like(pos)
+    for i, p in enumerate(pos):
+        ki, kj = int(p[0]) // CELL, int(p[1]) // CELL
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                for j in bucket.get((ki + di, kj + dj), []):
+                    if j == i:
+                        continue
+                    dx = p[0] - pos[j][0]
+                    dy = p[1] - pos[j][1]
+                    d  = (dx*dx + dy*dy) ** 0.5
+                    if d < 1e-3 or d >= AGENT_RADIUS * 6:
+                        continue
+                    m = AA_STRENGTH * np.exp((AGENT_RADIUS * 2 - d) / AA_RANGE)
+                    f_agent[i, 0] += m * dx / d
+                    f_agent[i, 1] += m * dy / d
 
     # Force 3: Wall repulsion
     d = dist_to_wall[iy, ix]
@@ -341,18 +355,22 @@ for step in range(total_steps):
         else: vx, vy = 0.0, 0.0
 
         agent["vx"], agent["vy"] = vx, vy
-        agent["trail"].append((agent["x"], agent["y"]))
+        if step % 4 == 0:  # store every 4th tick — cuts trail memory ~75%
+            agent["trail"].append((agent["x"], agent["y"]))
 
         cell_x = int(agent["x"])
         cell_y = int(agent["y"])
         density_map[cell_y, cell_x]    += 1
         congestion_map[cell_y, cell_x] += DT   # seconds spent here
 
-        # Exit check — record WHICH exit
-        epos  = np.array([agent["x"], agent["y"]])
-        dists = np.linalg.norm(exit_pts - epos, axis=1)
-        nearest_exit = int(np.argmin(dists))
-        if dists[nearest_exit] < EXIT_RADIUS:
+        # Exit check — scalar math, no per-agent numpy allocation
+        ax, ay = agent["x"], agent["y"]
+        nearest_exit, best_d2 = 0, float("inf")
+        for ei, ep in enumerate(exits):
+            d2 = (ax - ep["x"])**2 + (ay - ep["y"])**2
+            if d2 < best_d2:
+                best_d2, nearest_exit = d2, ei
+        if best_d2 < EXIT_RADIUS * EXIT_RADIUS:
             agent["evacuated"] = True
             agent["time"]      = sim_time
             agent["exit_used"] = nearest_exit
