@@ -278,9 +278,11 @@ class Agent:
 
     def v_pref(self, exit_radius=18.0, speed=None, sim_time=None):
         """Preferred velocity from flow field — wall-aware."""
-        # check if near any exit
+        # check if near any exit — scalar math, no allocation
+        er2 = exit_radius * exit_radius
         for idx, e in enumerate(self.exits_px):
-            if np.linalg.norm(self.pos - np.array([e["x"], e["y"]])) < exit_radius:
+            _dx = self.pos[0] - e["x"]; _dy = self.pos[1] - e["y"]
+            if _dx*_dx + _dy*_dy < er2:
                 self.done = True
                 self.time = sim_time
                 self.exit_used = idx
@@ -410,7 +412,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     t0 = time.time()
 
     for step in range(MAX_STEPS):
-        if all(a.done for a in agents):
+        if not any(not a.done for a in agents):
             break
 
         #  fire growth (visual only — routing already handled by hazard_zone) 
@@ -450,7 +452,8 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
                         if j == i:
                             continue
                         nb = agents[j]
-                        if np.linalg.norm(ag.pos - nb.pos) < NEIGH_DIST:
+                        _dx = ag.pos[0] - nb.pos[0]; _dy = ag.pos[1] - nb.pos[1]
+                        if _dx*_dx + _dy*_dy < NEIGH_DIST * NEIGH_DIST:
                             pt, nm = orca_halfplane(
                                 ag.pos, ag.vel, ag.radius,
                                 nb.pos, nb.vel, nb.radius, tau=TAU)
@@ -504,13 +507,14 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
             ag.pos[0] = np.clip(ag.pos[0], 0, W-1)
             ag.pos[1] = np.clip(ag.pos[1], 0, H-1)
             for exit_idx, exit_pt in enumerate(exits_px):
-                exit_pos = np.array([exit_pt["x"], exit_pt["y"]], dtype=float)
-                if np.linalg.norm(ag.pos - exit_pos) < EXIT_R:
+                _ex = ag.pos[0] - exit_pt["x"]; _ey = ag.pos[1] - exit_pt["y"]
+                if _ex*_ex + _ey*_ey < EXIT_R * EXIT_R:
                     ag.done = True
                     ag.time = (step + 1) * DT
                     ag.exit_used = exit_idx
                     break
-            ag.trail.append(ag.pos.copy())
+            if step % 3 == 0:  # trail thinning — every 3rd tick
+                ag.trail.append(ag.pos.copy())
             ag.check_stuck_and_push()
 
             ix = int(ag.pos[0])
