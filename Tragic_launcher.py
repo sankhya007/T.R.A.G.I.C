@@ -1,6 +1,5 @@
 import sys
 import json
-import math
 import time
 import threading
 import subprocess
@@ -567,107 +566,122 @@ class ToastNotification(QFrame):
 #  VIEW 1 — MAP PARSER
 # ══════════════════════════════════════════════════════════
 
-def _run_predict_tiled(image_path, max_patches, overlap_ratio,
-                       window_min, threshold, output_path,
+PATCH_SIZE = 256  # fixed model input size — must match predict_tiled.py
+
+
+def _run_predict_tiled(image_path, stride, max_patches, threshold, output_path,
                        progress_cb=None):
-    """Core predict_tiled logic extracted into a callable."""
+    """
+    Tiled inference — mirrors predict_tiled.py exactly.
+
+    Fixed 256×256 patches, Gaussian-weighted blending, 5% reflective padding,
+    morphological cleanup, and connected-component text removal.
+    stride  — pixel step between patches (lower = smoother, slower).
+    max_patches — hard cap on total patches processed (user-editable).
+    """
     import torch
     from model import UNet
-
-    MODEL_PATH  = "unet.pth"
-    OVERLAP_RATIO = overlap_ratio
-    MODEL_INPUT   = 256
-    WINDOW_MIN    = window_min
-    MAX_PATCHES   = max_patches
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     model = UNet()
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE))
+    model.load_state_dict(torch.load("unet.pth", map_location=DEVICE))
     model.to(DEVICE)
     model.eval()
 
-    def preprocess(patch):
-        patch = cv2.resize(patch, (MODEL_INPUT, MODEL_INPUT), interpolation=cv2.INTER_AREA)
+    def preprocess_patch(patch):
         patch = patch.astype(np.float32) / 255.0
         patch = np.transpose(patch, (2, 0, 1))
         return torch.from_numpy(patch).unsqueeze(0).to(DEVICE)
 
-    def weight_map(h, w):
-        y, x = np.ogrid[-1:1:h*1j, -1:1:w*1j]
+    def create_weight_map(size):
+        y, x = np.ogrid[-1:1:size*1j, -1:1:size*1j]
         return np.exp(-(x**2 + y**2) * 4).astype(np.float32)
 
-    def make_positions(total, win, stride):
-        pos = list(range(0, total - win, stride))
-        if not pos or pos[-1] + win < total:
-            pos.append(total - win)
-        return pos
-
+    # ── load and pad ────────────────────────────────────────────────────────
     img = cv2.imread(image_path)
+    if img is None:
+        raise ValueError(f"Could not read image: {image_path}")
     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     H, W, _ = img.shape
 
     pad_h, pad_w = int(0.05 * H), int(0.05 * W)
-    pH = H + 2 * pad_h
-    pW = W + 2 * pad_w
+    img_pad = cv2.copyMakeBorder(img, pad_h, pad_h, pad_w, pad_w,
+                                 cv2.BORDER_REFLECT_101)
+    padded_H, padded_W, _ = img_pad.shape
 
-    aspect = pW / pH
-    n_cols_est = math.sqrt(MAX_PATCHES * aspect)
-    n_rows_est = math.sqrt(MAX_PATCHES / aspect)
-    win_c = pW / (n_cols_est * (1.0 - OVERLAP_RATIO))
-    win_r = pH / (n_rows_est * (1.0 - OVERLAP_RATIO))
-    WINDOW = max(WINDOW_MIN, int(math.ceil(max(win_c, win_r))))
+    # ── build tile grid ─────────────────────────────────────────────────────
+    def make_positions(dim):
+        pos = list(range(0, dim - PATCH_SIZE, stride))
+        if not pos or pos[-1] != dim - PATCH_SIZE:
+            pos.append(max(0, dim - PATCH_SIZE))
+        return pos
 
-    def n_pos(dim, win, stride):
-        p = list(range(0, dim - win, stride))
-        if not p or p[-1] + win < dim:
-            p.append(dim - win)
-        return len(p)
+    y_positions = make_positions(padded_H)
+    x_positions = make_positions(padded_W)
+    # flatten to (y, x) pairs and cap at max_patches
+    all_positions = [(y, x) for y in y_positions for x in x_positions]
+    if len(all_positions) > max_patches:
+        # evenly sub-sample to stay within the cap
+        step = len(all_positions) / max_patches
+        all_positions = [all_positions[int(i * step)] for i in range(max_patches)]
+    total = len(all_positions)
 
-    while True:
-        STRIDE = max(1, int(round(WINDOW * (1.0 - OVERLAP_RATIO))))
-        if n_pos(pW, WINDOW, STRIDE) * n_pos(pH, WINDOW, STRIDE) <= MAX_PATCHES:
-            break
-        WINDOW += 1
-
-    wmap = weight_map(WINDOW, WINDOW)
-    img_pad = cv2.copyMakeBorder(img, pad_h, pad_h, pad_w, pad_w, cv2.BORDER_REFLECT_101)
-
-    final_mask = np.zeros((pH, pW), dtype=np.float32)
-    weight_sum  = np.zeros((pH, pW), dtype=np.float32)
-
-    y_pos = make_positions(pH, WINDOW, STRIDE)
-    x_pos = make_positions(pW, WINDOW, STRIDE)
-    total = len(y_pos) * len(x_pos)
+    wmap       = create_weight_map(PATCH_SIZE)
+    final_mask = np.zeros((padded_H, padded_W), dtype=np.float32)
+    weight_sum = np.zeros((padded_H, padded_W), dtype=np.float32)
     done = 0
 
-    for y1 in y_pos:
-        for x1 in x_pos:
-            patch = img_pad[y1:y1+WINDOW, x1:x1+WINDOW]
-            dh, dw = WINDOW - patch.shape[0], WINDOW - patch.shape[1]
-            if dh > 0 or dw > 0:
-                patch = cv2.copyMakeBorder(patch, 0, dh, 0, dw, cv2.BORDER_REFLECT_101)
-            t = preprocess(patch)
+    # ── inference loop ───────────────────────────────────────────────────────
+    for y1, x1 in all_positions:
+            patch = img_pad[y1:y1+PATCH_SIZE, x1:x1+PATCH_SIZE]
+            # guard against edge patches smaller than PATCH_SIZE
+            ph = PATCH_SIZE - patch.shape[0]
+            pw = PATCH_SIZE - patch.shape[1]
+            if ph > 0 or pw > 0:
+                patch = cv2.copyMakeBorder(patch, 0, ph, 0, pw,
+                                           cv2.BORDER_REFLECT_101)
+
+            t = preprocess_patch(patch)
             with torch.no_grad():
                 pred = model(t)
             pred = torch.sigmoid(pred).squeeze().cpu().numpy()
-            pred = cv2.resize(pred, (WINDOW, WINDOW), interpolation=cv2.INTER_LINEAR)
             pred = np.clip(pred, 0.05, 0.95)
-            final_mask[y1:y1+WINDOW, x1:x1+WINDOW] += pred * wmap
-            weight_sum [y1:y1+WINDOW, x1:x1+WINDOW] += wmap
+
+            final_mask[y1:y1+PATCH_SIZE, x1:x1+PATCH_SIZE] += pred * wmap
+            weight_sum[y1:y1+PATCH_SIZE, x1:x1+PATCH_SIZE] += wmap
             done += 1
             if progress_cb:
-                progress_cb(int(done / total * 90), f"Processing patch {done}/{total}")
+                progress_cb(int(done / total * 85), f"Patch {done}/{total}")
 
+    # ── normalize and unpad ──────────────────────────────────────────────────
     weight_sum[weight_sum == 0] = 1e-8
     final_mask = final_mask / weight_sum
-    final_mask = final_mask[pad_h:pad_h+H, pad_w:pad_w+W]
+    final_mask = final_mask[pad_h:pad_h + H, pad_w:pad_w + W]
 
+    if progress_cb:
+        progress_cb(88, "Cleaning mask...")
+
+    # ── binarize + morphological cleanup ────────────────────────────────────
     binary = (final_mask > threshold).astype(np.uint8)
     k = np.ones((3, 3), np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k)
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k)
     binary = cv2.dilate(binary, np.ones((2, 2), np.uint8), iterations=1)
+
+    # ── remove small square text/symbol blobs ────────────────────────────────
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+        binary, connectivity=8)
+    cleaned = np.zeros_like(binary)
+    for i in range(1, num_labels):
+        area  = stats[i, cv2.CC_STAT_AREA]
+        w_box = stats[i, cv2.CC_STAT_WIDTH]
+        h_box = stats[i, cv2.CC_STAT_HEIGHT]
+        aspect = max(w_box, h_box) / (min(w_box, h_box) + 1e-6)
+        if area < 80 and aspect < 3.0:
+            continue
+        cleaned[labels == i] = 1
+    binary = cleaned
 
     cv2.imwrite(output_path, binary * 255)
     if progress_cb:
@@ -722,30 +736,27 @@ class View1_MapParser(QWidget):
         lv.addWidget(self._sep())
         lv.addWidget(self._section_label("TILING PARAMETERS"))
 
-        # Parameters
+        # Parameters — fixed 256×256 patches (matches predict_tiled.py)
         form = QFormLayout()
         form.setSpacing(8)
 
+        self.stride_spin = QSpinBox()
+        self.stride_spin.setRange(32, 256)
+        self.stride_spin.setSingleStep(32)
+        self.stride_spin.setValue(128)
+        self.stride_spin.setToolTip(
+            "Patch stride in pixels. Lower = more overlap, smoother seams, slower. "
+            "Default 128 = 50% overlap on 256×256 patches.")
+        self.stride_spin.valueChanged.connect(self._refresh_ideal_patches)
+        form.addRow("Stride (px):", self.stride_spin)
+
         self.max_patches_spin = QSpinBox()
-        self.max_patches_spin.setRange(10, 200)
+        self.max_patches_spin.setRange(1, 9999)
         self.max_patches_spin.setValue(40)
-        self.max_patches_spin.setToolTip("Hard ceiling on total patch count. Higher = slower but finer detail.")
+        self.max_patches_spin.setToolTip(
+            "Auto-filled on image load with the ideal patch count for this "
+            "image size and stride. Override manually if you want to cap it.")
         form.addRow("Max Patches:", self.max_patches_spin)
-
-        self.overlap_spin = QDoubleSpinBox()
-        self.overlap_spin.setRange(0.1, 0.9)
-        self.overlap_spin.setSingleStep(0.05)
-        self.overlap_spin.setValue(0.50)
-        self.overlap_spin.setDecimals(2)
-        self.overlap_spin.setToolTip("Overlap between adjacent patches (0.5 = 50%). Higher = smoother boundaries.")
-        form.addRow("Overlap Ratio:", self.overlap_spin)
-
-        self.window_min_spin = QSpinBox()
-        self.window_min_spin.setRange(64, 512)
-        self.window_min_spin.setSingleStep(32)
-        self.window_min_spin.setValue(256)
-        self.window_min_spin.setToolTip("Minimum patch window size in pixels. Never goes below this.")
-        form.addRow("Window Min (px):", self.window_min_spin)
 
         self.threshold_spin = QDoubleSpinBox()
         self.threshold_spin.setRange(0.1, 0.9)
@@ -804,11 +815,19 @@ class View1_MapParser(QWidget):
         rv.setSpacing(8)
 
         preview_header = QHBoxLayout()
-        preview_title = QLabel("Output Preview")
-        preview_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
+        self.preview_title = QLabel("Output Preview")
+        self.preview_title.setStyleSheet("font-weight: bold; font-size: 11pt;")
         self.reset_zoom_btn = QPushButton("Fit")
         self.reset_zoom_btn.setFixedWidth(50)
         self.reset_zoom_btn.clicked.connect(lambda: self.preview.reset_zoom())
+
+        # compare toggle — shown only after a mask exists
+        self.compare_btn = QPushButton("⇄ Show Original")
+        self.compare_btn.setCheckable(True)
+        self.compare_btn.setVisible(False)
+        self.compare_btn.setToolTip("Toggle between the binary mask and the original floorplan for comparison")
+        self.compare_btn.clicked.connect(self._toggle_compare)
+        self._showing_mask = True   # track which image is currently displayed
 
         self.edit_btn = QPushButton("✏ Edit Mask")
         self.edit_btn.setCheckable(True)
@@ -827,8 +846,9 @@ class View1_MapParser(QWidget):
         self.save_edits_btn.setVisible(False)
         self.save_edits_btn.clicked.connect(self._save_edits)
 
-        preview_header.addWidget(preview_title)
+        preview_header.addWidget(self.preview_title)
         preview_header.addStretch()
+        preview_header.addWidget(self.compare_btn)
         preview_header.addWidget(self.edit_btn)
         preview_header.addWidget(self.brush_spin)
         preview_header.addWidget(self.save_edits_btn)
@@ -854,6 +874,50 @@ class View1_MapParser(QWidget):
         l = QLabel(text); l.setObjectName("section")
         return l
 
+
+    def _toggle_compare(self, checked):
+        """Switch the preview between the binary mask and the original floorplan."""
+        if checked:
+            if self.state.image_path and Path(self.state.image_path).exists():
+                self.preview.load_image(self.state.image_path)
+            self.compare_btn.setText("⇄ Show Mask")
+            self.preview_title.setText("Output Preview — Original")
+            self._showing_mask = False
+            self.edit_btn.setEnabled(False)
+            self.save_edits_btn.setEnabled(False)
+        else:
+            if self.state.mask_path and Path(self.state.mask_path).exists():
+                self.preview.load_canvas(self.state.mask_path)
+            self.compare_btn.setText("⇄ Show Original")
+            self.preview_title.setText("Output Preview — Mask")
+            self._showing_mask = True
+            self.edit_btn.setEnabled(True)
+            self.save_edits_btn.setEnabled(True)
+
+    def _compute_ideal_patches(self, image_path, stride):
+        """Return the natural patch count for this image + stride (no cap)."""
+        img = cv2.imread(image_path)
+        if img is None:
+            return 40
+        H, W = img.shape[:2]
+        pad_h, pad_w = int(0.05 * H), int(0.05 * W)
+        pH, pW = H + 2 * pad_h, W + 2 * pad_w
+
+        def n_pos(dim):
+            pos = list(range(0, dim - PATCH_SIZE, stride))
+            if not pos or pos[-1] != dim - PATCH_SIZE:
+                pos.append(max(0, dim - PATCH_SIZE))
+            return len(pos)
+
+        return max(1, n_pos(pH) * n_pos(pW))
+
+    def _refresh_ideal_patches(self):
+        """Recompute and update the Max Patches field whenever stride changes."""
+        if self.state.image_path:
+            ideal = self._compute_ideal_patches(
+                self.state.image_path, self.stride_spin.value())
+            self.max_patches_spin.setValue(ideal)
+
     def _browse(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Floorplan Image", "",
@@ -867,7 +931,10 @@ class View1_MapParser(QWidget):
             self.tweak_btn.setVisible(False)
             self.proceed_btn.setVisible(False)
             self.preview_info.setText("")
-            self.preview.load_image(path) # to show the original image before parsing
+            # auto-fill ideal patch count for this image + current stride
+            ideal = self._compute_ideal_patches(path, self.stride_spin.value())
+            self.max_patches_spin.setValue(ideal)
+            self.preview.load_image(path)  # show original before parsing
             
     def _run(self):
         if not self.state.image_path:
@@ -941,9 +1008,8 @@ class View1_MapParser(QWidget):
         self._worker = Worker(
             _run_predict_tiled,
             self.state.image_path,
+            self.stride_spin.value(),
             self.max_patches_spin.value(),
-            self.overlap_spin.value(),
-            self.window_min_spin.value(),
             self.threshold_spin.value(),
             output,
         )
@@ -973,6 +1039,11 @@ class View1_MapParser(QWidget):
                 )
             self.tweak_btn.setVisible(True)
             self.debug_btn.setVisible(True)
+            self.compare_btn.setVisible(True)
+            self.compare_btn.setChecked(False)
+            self.compare_btn.setText("⇄ Show Original")
+            self._showing_mask = True
+            self.preview_title.setText("Output Preview — Mask")
             self.edit_btn.setVisible(True)
             self.brush_spin.setVisible(True)
             self.save_edits_btn.setVisible(True)
@@ -1017,6 +1088,10 @@ class View1_MapParser(QWidget):
     def _toggle_edit(self, checked):
         self.preview.edit_mode = checked
         if checked:
+            # if the user is viewing the original, snap back to mask before editing
+            if not self._showing_mask:
+                self.compare_btn.setChecked(False)
+                self._toggle_compare(False)
             self.edit_btn.setText("✏ Editing...")
             self.edit_btn.setStyleSheet(f"background: {DARK['warning']}; color: black; font-weight: bold;")
             self.preview.setDragMode(QGraphicsView.DragMode.NoDrag)
