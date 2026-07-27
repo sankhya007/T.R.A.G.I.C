@@ -10,3 +10,4 @@ PyQt6>=6.5.0                    # GUI — launcher, zone editor, sim viewer
 pytest>=7.2.0                   # testing framework
 pandas>=2.0.0                   # data handling, logging
 opencv-python-headless>=4.8.0   # headless OpenCV for CI/CD
+tqdm 
