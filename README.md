@@ -218,7 +218,7 @@ This is the known synthetic-mask plateau effect. Zone detection works correctly 
 
 ## Team
 
-Aniket Sarkar · Shreyashi Malakar · Swapnil Roy · Tiyasa Nayak · Arinima Chakraborty
+Sankyapriyo Dey · Aniket Sarkar
 
 ---
 
