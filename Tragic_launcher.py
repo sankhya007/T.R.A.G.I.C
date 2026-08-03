@@ -6,9 +6,11 @@ import subprocess
 import hashlib
 import ssl
 import urllib.parse
+import uuid
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
+from security_utils import load_zone_config
 
 import numpy as np
 import cv2
@@ -1808,8 +1810,7 @@ class View2_ZoneEditor(QWidget):
     def _load_config_from_path(self, path: str):
         """Parse zone config JSON and populate UI state."""
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                config = json.load(f)
+            config = load_zone_config(path)
         except Exception as e:
             QMessageBox.critical(self, "Error loading config", str(e))
             return
@@ -2255,6 +2256,15 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
 
     Path("output").mkdir(exist_ok=True)
 
+    allowed_scripts = {
+        "SFM_evacuation.py", "RVO_evacuation.py",
+        "continuum_evacuation_path.py", "CA_evacuation.py",
+    }
+    if script_name not in allowed_scripts:
+        raise ValueError(f"Unsupported simulation script: {script_name}")
+    if not Path(mask_path).is_file() or not Path(zone_config_path).is_file():
+        raise FileNotFoundError("The selected mask and zone configuration must be regular files")
+
     runtime_mask = Path("stitched_mask.png")
     runtime_zone_config = Path("zone_config.json")
     runtime_stitched_config = Path("stitched_mask_zone_config.json")
@@ -2263,8 +2273,7 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
     if Path(mask_path).resolve() != runtime_mask.resolve():
         shutil.copy2(mask_path, runtime_mask)
 
-    with open(zone_config_path, "r", encoding="utf-8") as f:
-        zone_config = json.load(f)
+    zone_config = load_zone_config(zone_config_path)
     zone_config["mask_path"] = str(runtime_mask)
 
     # Ensure hazard is included in the config
@@ -2293,6 +2302,8 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
             return [str(Path(sys.executable).parent / exe_name)]
         return [sys.executable, script_name]       # normal dev mode
 
+    run_output_dir = (Path("output") / f"run-{uuid.uuid4().hex}").resolve()
+    run_output_dir.mkdir(mode=0o700, parents=True)
     proc = subprocess.Popen(
         _resolve_runner(script_name) + script_args.get(script_name, []),
         stdout=subprocess.PIPE,
@@ -2300,7 +2311,9 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
         text=True,
         encoding="utf-8",
         errors="replace",
-        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        cwd=Path(__file__).resolve().parent,
+        shell=False,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8", "TRAGIC_OUTPUT_DIR": str(run_output_dir)},
     )
 
     pct = 10
@@ -2337,7 +2350,7 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
     }
 
     # copy image to output/ destination expected by MODEL_CONFIGS
-    actual_out = script_outputs.get(script_name)
+    actual_out = run_output_dir / Path(script_outputs[script_name]).name
     if actual_out and Path(actual_out).exists():
         if Path(actual_out).resolve() != Path(output_path).resolve():
             import shutil as _sh
@@ -2346,7 +2359,7 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
         raise RuntimeError(f"Output image not found: {output_path}")
 
     # copy report to last_sim_report.txt so View Report button works
-    report_src = script_reports.get(script_name)
+    report_src = run_output_dir / Path(script_reports[script_name]).name
     if report_src and Path(report_src).exists():
         import shutil as _sh
         _sh.copy2(report_src, "last_sim_report.txt")
@@ -2645,14 +2658,15 @@ class View3_Simulation(QWidget):
         runtime_stitched_config = Path("stitched_mask_zone_config.json")
         if Path(self.state.mask_path).resolve() != runtime_mask.resolve():
             shutil.copy2(self.state.mask_path, runtime_mask)
-        with open(self.state.zone_config_path, "r", encoding="utf-8") as f:
-            zone_config = json.load(f)
+        zone_config = load_zone_config(self.state.zone_config_path)
         zone_config["mask_path"] = str(runtime_mask)
         for target in (runtime_zone_config, runtime_stitched_config):
             with open(target, "w", encoding="utf-8") as f:
                 json.dump(zone_config, f, indent=2)
 
         def _do_compare(progress_cb=None):
+            run_output_dir = (Path("output") / f"compare-{uuid.uuid4().hex}").resolve()
+            run_output_dir.mkdir(mode=0o700, parents=True)
             proc = subprocess.Popen(
                 [sys.executable, "compare_models.py", "stitched_mask.png", "zone_config.json"],
                 stdout=subprocess.PIPE,
@@ -2660,7 +2674,9 @@ class View3_Simulation(QWidget):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+                cwd=Path(__file__).resolve().parent,
+                shell=False,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8", "TRAGIC_OUTPUT_DIR": str(run_output_dir)},
             )
             pct = 0
             for line in proc.stdout:

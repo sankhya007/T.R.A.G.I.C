@@ -5,6 +5,7 @@ import sys
 import numpy as np
 from collections import deque
 from pathlib import Path
+from security_utils import load_runtime_params, load_zone_config, output_path
 
 # 
 # CONFIG  — tweak everything here
@@ -12,8 +13,8 @@ from pathlib import Path
 CONFIG = {
     "mask_path":    "stitched_mask.png",
     "config_path":  "zone_config.json",
-    "out_image":    "output/ca_paths.png",
-    "out_report":   "output/ca_report.txt",
+    "out_image":    str(output_path("ca_paths.png")),
+    "out_report":   str(output_path("ca_report.txt")),
 
     "dt":           0.05,    # seconds per tick
     "max_time":     120.0,   # hard cap in seconds
@@ -65,8 +66,7 @@ def apply_runtime_args():
     if len(sys.argv) > 3:
         params_path = Path(sys.argv[3])
         if params_path.exists():
-            with open(params_path, "r", encoding="utf-8") as f:
-                params = json.load(f)
+            params = load_runtime_params(params_path, set(CONFIG) - {"mask_path", "config_path", "out_image", "out_report"})
             for key, value in params.items():
                 if key in CONFIG:
                     CONFIG[key] = value
@@ -570,8 +570,7 @@ def main():
     import os as _os; _os.makedirs("output", exist_ok=True)
     img, walkable, walk_u8, H, W = load_mask(C["mask_path"])
 
-    with open(C["config_path"]) as f:
-        cfg_data = json.load(f)
+    cfg_data = load_zone_config(C["config_path"])
     exits_cfg = cfg_data["exits"]
 
     #  hazard: carve a permanent no-go zone, same as SFM/RVO/Continuum 

@@ -7,6 +7,7 @@ import heapq
 from scipy import ndimage as ndi
 from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
+from security_utils import load_runtime_params, load_zone_config, output_path
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
@@ -14,7 +15,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning)
 CFG = {
     "mask_path":    "",
     "zone_config": "stitched_mask_zone_config.json",
-    "output":      "output/continuum_agent_paths.png",
+    "output":      str(output_path("continuum_agent_paths.png")),
 
     "DT":          0.05,
     "MAX_TIME":    40,
@@ -54,8 +55,7 @@ def apply_runtime_args():
     if len(sys.argv) > 3:
         params_path = Path(sys.argv[3])
         if params_path.exists():
-            with open(params_path, "r", encoding="utf-8") as f:
-                params = json.load(f)
+            params = load_runtime_params(params_path, set(CFG) - {"mask_path", "zone_config", "output", "wall_color", "exit_color"})
             for key, value in params.items():
                 if key in CFG:
                     CFG[key] = value
@@ -302,8 +302,7 @@ def main():
     if not Path(cfg_path).exists():
         print(f"ERROR: {cfg_path} not found"); sys.exit(1)
 
-    with open(cfg_path) as f:
-        zcfg = json.load(f)
+    zcfg = load_zone_config(cfg_path)
 
     mask_path = CFG.get("mask_path") or zcfg.get("mask_path", "")
     if not Path(mask_path).exists():
@@ -647,10 +646,10 @@ def main():
 
     report = "\n".join(lines)
     print(report.encode("ascii", errors="replace").decode("ascii"))
-    import os as _os; _os.makedirs("output", exist_ok=True)
-    with open("output/continuum_report.txt", "w", encoding="utf-8") as f:
+    report_path = output_path("continuum_report.txt")
+    with open(report_path, "w", encoding="utf-8") as f:
         f.write(report)
-    print("Saved -> output/continuum_report.txt")
+    print(f"Saved -> {report_path}")
 
     #  Render 
     print("\nRendering...")

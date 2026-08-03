@@ -4,12 +4,13 @@ import sys
 import numpy as np
 from collections import deque
 from pathlib import Path
+from security_utils import load_runtime_params, load_zone_config, output_path
 
 #  CONFIG 
 MASK_PATH   = Path("stitched_mask.png")
 CONFIG_PATH = Path("zone_config.json")
-OUT_PATHS   = Path("output/sfm_agent_paths.png")
-OUT_REPORT  = Path("output/SFM_output_report.txt")
+OUT_PATHS   = output_path("sfm_agent_paths.png")
+OUT_REPORT  = output_path("SFM_output_report.txt")
 
 DT       = 0.05
 MAX_TIME = 120
@@ -35,8 +36,11 @@ AGENT_VISION_RADIUS   = 60    # px — how far ahead an agent can "see" fire and
 if len(sys.argv) > 1: MASK_PATH = sys.argv[1]
 if len(sys.argv) > 2: CONFIG_PATH = sys.argv[2]
 if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
-    with open(sys.argv[3]) as f:
-        _params = json.load(f)
+    _params = load_runtime_params(sys.argv[3], {
+        "speed_min", "speed_max", "relaxation_time", "agent_strength",
+        "wall_strength", "panic_threshold", "max_time",
+        "fire_spread_speed", "fire_intensity_factor",
+    })
     FIRE_SPREAD_SPEED     = _params.get("fire_spread_speed", FIRE_SPREAD_SPEED)
     FIRE_INTENSITY_FACTOR = _params.get("fire_intensity_factor", FIRE_INTENSITY_FACTOR)
 # 
@@ -144,8 +148,7 @@ def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
     return new_intensity
 
 
-with open(CONFIG_PATH) as f:
-    cfg = json.load(f)
+cfg = load_zone_config(CONFIG_PATH)
 
 
 exits = cfg["exits"]
@@ -567,7 +570,6 @@ cv2.rectangle(base, (4, 4), (130, 30), (0, 0, 0), -1)
 cv2.putText(base, f"SCORE: {final_score}/100",
             (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, score_color, 1)
 
-import os as _os; _os.makedirs("output", exist_ok=True)
 cv2.imwrite(OUT_PATHS, base)
 print(f"Saved: {OUT_PATHS}")
 

@@ -12,6 +12,7 @@ import cv2
 from scipy import ndimage as ndi
 from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
+from security_utils import load_runtime_params, load_zone_config, output_path
 
 np.random.seed(42)
 
@@ -328,8 +329,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     print(f"Mask: {W}×{H}  walkable={walkable.mean()*100:.1f}%")
 
     #  load config 
-    with open(config_path) as f:
-        cfg = json.load(f)
+    cfg = load_zone_config(config_path)
     exits_px = cfg.get("exits", [])
     if not exits_px:
         raise ValueError("No exits in zone config.")
@@ -584,7 +584,7 @@ def _save_paths(agents, exits_px, walkable, W, H, done_n, fire_intensity=None):
     cv2.putText(base, f"Agents:{total}  Evac:{done_n}({pct_done}%)  RVO/ORCA",
                 (8, H - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (160, 160, 160), 1)
 
-    out = "output/rvo_agent_paths.png"
+    out = output_path("rvo_agent_paths.png")
     cv2.imwrite(out, base)
     print(f"Saved {out}")
 
@@ -594,7 +594,7 @@ def _save_heatmap(density_acc, n_frames, walkable, exits_px, W, H):
 
 def _save_csv(ts_time, ts_active, ts_evac):
     import csv
-    out = "output/rvo_analytics.csv"
+    out = output_path("rvo_analytics.csv")
     with open(out, "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["time_s", "active_agents", "evacuated"])
@@ -633,7 +633,7 @@ def _top_congestion_points(density_acc, n_frames, walkable, limit=5):
 def _save_report(agents, exits_px, density_acc, n_frames, walkable,
                  done_n, step_count, dt, elapsed,
                  hazard_cfg=None, hazard_xy=None, hazard_radius=90):
-    out = "output/RVO_output_report.txt"
+    out = output_path("RVO_output_report.txt")
     total = len(agents)
     rate = done_n / max(total, 1)
     sim_time = step_count * dt
@@ -761,8 +761,11 @@ if __name__ == "__main__":
     _fire_intensity_factor = 1.0
     _max_time = 400.0
     if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
-        with open(sys.argv[3]) as f:
-            _params = json.load(f)
+        _params = load_runtime_params(sys.argv[3], {
+            "speed_min", "speed_max", "time_horizon", "neighbor_dist",
+            "max_neighbors", "panic_threshold", "max_time",
+            "fire_spread_speed", "fire_intensity_factor",
+        })
         _fire_spread_speed     = _params.get("fire_spread_speed", _fire_spread_speed)
         _fire_intensity_factor = _params.get("fire_intensity_factor", _fire_intensity_factor)
         _max_time              = _params.get("max_time", _max_time)

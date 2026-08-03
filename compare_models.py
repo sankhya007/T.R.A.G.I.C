@@ -1,14 +1,18 @@
 import subprocess, sys, re, time
 from pathlib import Path
+from security_utils import load_zone_config, output_path
 
 MASK   = sys.argv[1] if len(sys.argv) > 1 else "stitched_mask.png"
 CONFIG = sys.argv[2] if len(sys.argv) > 2 else "zone_config.json"
+if not Path(MASK).is_file():
+    raise FileNotFoundError(f"Mask is not a regular file: {MASK}")
+load_zone_config(CONFIG)
 
 RUNS = [
-    ("SFM",       "SFM_evacuation.py",            "output/SFM_output_report.txt"),
-    ("RVO",       "RVO_evacuation.py",             "output/RVO_output_report.txt"),
-    ("CA",        "CA_evacuation.py",              "output/ca_report.txt"),
-    ("Continuum", "continuum_evacuation_path.py",  "output/continuum_report.txt"),
+    ("SFM",       "SFM_evacuation.py",            output_path("SFM_output_report.txt")),
+    ("RVO",       "RVO_evacuation.py",             output_path("RVO_output_report.txt")),
+    ("CA",        "CA_evacuation.py",              output_path("ca_report.txt")),
+    ("Continuum", "continuum_evacuation_path.py",  output_path("continuum_report.txt")),
 ]
 
 def parse_report(path):
@@ -26,7 +30,7 @@ results = {}
 for name, script, report_path in RUNS:
     print(f"\n=== Running {name} ===")
     t0 = time.time()
-    proc = subprocess.run([sys.executable, script, MASK, CONFIG])
+    proc = subprocess.run([sys.executable, script, MASK, CONFIG], shell=False, cwd=Path(__file__).resolve().parent)
     elapsed = time.time() - t0
     if proc.returncode != 0 or not Path(report_path).exists():
         print(f"  {name} FAILED")
@@ -51,6 +55,6 @@ lines.insert(1, "-" * (sum(widths) + 2 * (len(widths) - 1)))
 table = "\n".join(lines)
 
 print("\n" + table)
-Path("output").mkdir(exist_ok=True)
-Path("output/model_comparison.txt").write_text(table + "\n", encoding="utf-8")
-print("\nSaved: output/model_comparison.txt")
+comparison_path = output_path("model_comparison.txt")
+comparison_path.write_text(table + "\n", encoding="utf-8")
+print(f"\nSaved: {comparison_path}")
