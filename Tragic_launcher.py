@@ -3,6 +3,9 @@ import json
 import time
 import threading
 import subprocess
+import hashlib
+import ssl
+import urllib.parse
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -568,6 +571,12 @@ class ToastNotification(QFrame):
 
 PATCH_SIZE  = 256
 MAX_DIRECT  = 2_250_000   # ~1500×1500 — mirrors predict_combined.py
+MODEL_URL = (
+    "https://huggingface.co/sankhya007/Floorplan_parser_STITCH/resolve/"
+    "cbf94ef2a8a895cece256750fdde242cd8989f51/unet.pth"
+)
+# SHA-256 published by Hugging Face for unet.pth at the pinned revision above.
+MODEL_SHA256 = "e8b8b59f9bca756bb933f0a922897001cd5da5062e5501611356d54092f30bd1"
 
 # ── Drop-zone widget ────────────────────────────────────────────────────────
 
@@ -670,7 +679,8 @@ def _run_predict_tiled(image_path, stride, max_patches, threshold, output_path,
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNet()
-    model.load_state_dict(torch.load("unet.pth", map_location=device))
+    model.load_state_dict(torch.load(
+        "unet.pth", map_location=device, weights_only=True))
     model.to(device)
     model.eval()
 
@@ -764,7 +774,8 @@ def _run_predict_direct(image_path, threshold, output_path, progress_cb=None):
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = UNet()
-    model.load_state_dict(torch.load("unet.pth", map_location=DEVICE))
+    model.load_state_dict(torch.load(
+        "unet.pth", map_location=DEVICE, weights_only=True))
     model.to(DEVICE)
     model.eval()
 
@@ -1177,27 +1188,43 @@ class View1_MapParser(QWidget):
 
             def _download(progress_cb=None):
                 import urllib.request
-                url = (
-                    "https://huggingface.co/sankhya007/Floorplan_parser_STITCH"
-                    "/resolve/main/unet.pth"
-                )
                 dest = Path("unet.pth")
-                with urllib.request.urlopen(url) as response:
-                    total = int(response.headers.get("Content-Length", 0))
-                    downloaded = 0
-                    chunk = 1024 * 64
-                    with open(dest, "wb") as f:
-                        while True:
-                            buf = response.read(chunk)
-                            if not buf:
-                                break
-                            f.write(buf)
-                            downloaded += len(buf)
-                            if total and progress_cb:
-                                progress_cb(int(downloaded / total * 100),
-                                            f"Downloading… {downloaded // 1024 // 1024} MB")
+                temp_dest = dest.with_suffix(dest.suffix + ".download")
+                digest = hashlib.sha256()
+                context = ssl.create_default_context()
+                # Be explicit about the TLS requirements for this security-sensitive download.
+                context.check_hostname = True
+                context.verify_mode = ssl.CERT_REQUIRED
+
+                try:
+                    request = urllib.request.Request(MODEL_URL, headers={"User-Agent": "TRAGIC"})
+                    with urllib.request.urlopen(request, context=context, timeout=30) as response:
+                        if urllib.parse.urlparse(response.geturl()).scheme.lower() != "https":
+                            raise RuntimeError("Model download was redirected to a non-HTTPS URL")
+                        total = int(response.headers.get("Content-Length", 0))
+                        downloaded = 0
+                        chunk = 1024 * 64
+                        with open(temp_dest, "wb") as f:
+                            while True:
+                                buf = response.read(chunk)
+                                if not buf:
+                                    break
+                                f.write(buf)
+                                digest.update(buf)
+                                downloaded += len(buf)
+                                if total and progress_cb:
+                                    progress_cb(int(downloaded / total * 100),
+                                                f"Downloading… {downloaded // 1024 // 1024} MB")
+
+                    if digest.hexdigest() != MODEL_SHA256:
+                        raise RuntimeError("Downloaded model failed SHA-256 verification")
+                    temp_dest.replace(dest)
+                except Exception:
+                    if temp_dest.exists():
+                        temp_dest.unlink()
+                    raise
                 if progress_cb:
-                    progress_cb(100, "Download complete")
+                    progress_cb(100, "Download complete and verified")
 
             self._dl_worker = Worker(_download)
             self._dl_worker.progress.connect(self._on_progress)

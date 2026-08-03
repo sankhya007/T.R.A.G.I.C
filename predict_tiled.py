@@ -54,7 +54,8 @@ def main():
         raise FileNotFoundError(f"Image not found: {args.image}")
 
     model = UNet()
-    model.load_state_dict(torch.load(args.model, map_location=device))
+    model.load_state_dict(torch.load(
+        args.model, map_location=device, weights_only=True))
     model.to(device)
     model.eval()
     print(f"Model loaded: {args.model}")
