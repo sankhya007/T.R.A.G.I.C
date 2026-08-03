@@ -4,15 +4,13 @@ from collections import defaultdict, deque
 
 import numpy as np
 import cv2
-# import matplotlib
-# matplotlib.use("Agg")
-# import matplotlib.pyplot as plt
-# from matplotlib.collections import LineCollection
-
 from scipy import ndimage as ndi
 from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
-from security_utils import load_runtime_params, load_zone_config, output_path
+from security_utils import (
+    HAZARD_BLOCK_RADIUS, WATERSHED_MIN_DISTANCE, load_runtime_params,
+    load_zone_config, output_path, validate_image_path,
+)
 
 np.random.seed(42)
 
@@ -243,7 +241,7 @@ def segment_zones(walkable_mask):
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
     dist      = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
     dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-    coords    = peak_local_max(dist_norm, min_distance=40, labels=binary)
+    coords    = peak_local_max(dist_norm, min_distance=WATERSHED_MIN_DISTANCE, labels=binary)
     seed_mask = np.zeros(dist_norm.shape, dtype=bool)
     seed_mask[tuple(coords.T)] = True
     markers, _ = ndi.label(seed_mask)
@@ -257,13 +255,14 @@ def segment_zones(walkable_mask):
 class Agent:
     _ctr = 0
 
-    def __init__(self, x, y, exits_px, flow, dist_g, speed_px_s=30.0, radius=5.0,
+    def __init__(self, x, y, exits_px, flow, dist_g, speed_px_s=30.0, speed_min=None, radius=5.0,
                  hazard_zone=None, hazard_xy=None):
         Agent._ctr += 1
         self.id      = Agent._ctr
         self.pos     = np.array([x, y], dtype=float)
         self.vel     = np.zeros(2)
-        self.speed   = speed_px_s * np.random.uniform(0.85, 1.15)
+        lower_speed = speed_px_s * 0.85 if speed_min is None else min(speed_min, speed_px_s)
+        self.speed   = np.random.uniform(lower_speed, speed_px_s)
         self.radius  = radius
         self.done    = False
         self.flow    = flow       # shared reference
@@ -319,9 +318,12 @@ class Agent:
 # 
 
 def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
-        fire_intensity_factor: float = 1.0, max_time: float = 400.0):
+        fire_intensity_factor: float = 1.0, max_time: float = 400.0,
+        speed_min: float = 25.5, speed_max: float = 30.0, time_horizon: float = 2.0,
+        neighbor_dist: float = 60.0, max_neighbors: int = 10):
     #  load mask 
-    img      = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    mask_path = validate_image_path(mask_path)
+    img      = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(mask_path)
     walkable = img < 128      # white=wall, black=walkable
@@ -337,7 +339,6 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
 
     #  hazard: carve a permanent no-go zone out of walkable, same as SFM 
     hazard_cfg = cfg.get("hazard")
-    HAZARD_BLOCK_RADIUS = 90
     FIRE_SPREAD_SPEED     = fire_spread_speed
     FIRE_INTENSITY_FACTOR = fire_intensity_factor
     hazard_zone = np.zeros((H, W), dtype=bool)
@@ -389,7 +390,7 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
         for _ in range(n):
             idx = np.random.randint(len(pool))
             px, py = float(pool[idx][0]), float(pool[idx][1])
-            agents.append(Agent(px, py, exits_px, flow, dist_g,
+            agents.append(Agent(px, py, exits_px, flow, dist_g, speed_px_s=speed_max, speed_min=speed_min,
                                  hazard_zone=hazard_zone, hazard_xy=hazard_xy))
 
     print(f"Spawned {len(agents)} agents")
@@ -397,8 +398,8 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
     #  sim constants 
     DT         = 0.1
     MAX_STEPS  = int(max_time / DT)
-    TAU        = 2.0
-    NEIGH_DIST = 60.0
+    TAU        = time_horizon
+    NEIGH_DIST = neighbor_dist
     CELL_SZ    = 30.0
     EXIT_R     = 18.0
 
@@ -417,13 +418,9 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
 
         #  fire growth (visual only — routing already handled by hazard_zone) 
         # SFM updates every 0.5s of sim time (step%10 at its DT=0.05) for a
-        # 120s-long run. RVO's sim can run far longer than that while agents
-        # are still evacuating, so cap fire growth at the same 120s budget —
-        # otherwise it just keeps spreading well past where SFM would stop.
         FIRE_TICK_INTERVAL = 0.5
-        FIRE_GROWTH_BUDGET = 120.0
         sim_t = step * DT
-        if hazard_cfg and sim_t <= FIRE_GROWTH_BUDGET and abs(sim_t % FIRE_TICK_INTERVAL) < DT / 2:
+        if hazard_cfg and sim_t <= max_time and abs(sim_t % FIRE_TICK_INTERVAL) < DT / 2:
             fire_intensity = spread_fire(fire_intensity, walkable, FIRE_TICK_INTERVAL,
                                           FIRE_SPREAD_SPEED, FIRE_INTENSITY_FACTOR)
 
@@ -459,6 +456,8 @@ def run(mask_path: str, config_path: str, fire_spread_speed: float = 1.0,
                                 nb.pos, nb.vel, nb.radius, tau=TAU)
                             halfplanes.append((pt, nm))
 
+            if len(halfplanes) > max_neighbors:
+                halfplanes = halfplanes[:max_neighbors]
             v_new = resolve_velocity(vp, halfplanes, ag.speed)
 
             # soft wall repulsion (last safety net)
@@ -590,7 +589,17 @@ def _save_paths(agents, exits_px, walkable, W, H, done_n, fire_intensity=None):
 
 
 def _save_heatmap(density_acc, n_frames, walkable, exits_px, W, H):
-    pass # no need lol fuck this - im not doing this 
+    density = density_acc / max(n_frames, 1)
+    density[~walkable] = 0
+    scale = 255.0 / max(float(density.max()), 1e-8)
+    heatmap = cv2.applyColorMap((density * scale).clip(0, 255).astype(np.uint8), cv2.COLORMAP_JET)
+    heatmap[~walkable] = (45, 45, 45)
+    for exit_ in exits_px:
+        cv2.circle(heatmap, (int(exit_["x"]), int(exit_["y"])), 10, (0, 255, 255), 2)
+    out = output_path("rvo_density_heatmap.png")
+    if not cv2.imwrite(str(out), heatmap):
+        raise OSError(f"Could not write heatmap to {out}")
+    print(f"Saved {out}")
 
 def _save_csv(ts_time, ts_active, ts_evac):
     import csv
@@ -648,7 +657,7 @@ def _save_report(agents, exits_px, density_acc, n_frames, walkable,
     score_rate = rate * 50
     if times:
         mean_t = float(np.mean(times))
-        score_time = max(0, 20 * (1 - (mean_t - 20) / 80)) if mean_t > 20 else 20.0
+        score_time = max(0, 20 * (1 - (mean_t - 20) / 60)) if mean_t > 20 else 20.0
     else:
         mean_t = sim_time
         score_time = 0.0
@@ -760,17 +769,28 @@ if __name__ == "__main__":
     _fire_spread_speed = 1.0
     _fire_intensity_factor = 1.0
     _max_time = 400.0
+    _speed_max = 30.0
+    _speed_min = 25.5
+    _time_horizon = 2.0
+    _neighbor_dist = 60.0
+    _max_neighbors = 10
     if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
         _params = load_runtime_params(sys.argv[3], {
             "speed_min", "speed_max", "time_horizon", "neighbor_dist",
             "max_neighbors", "panic_threshold", "max_time",
             "fire_spread_speed", "fire_intensity_factor",
-        })
+        }, ignore_unknown=True)
         _fire_spread_speed     = _params.get("fire_spread_speed", _fire_spread_speed)
         _fire_intensity_factor = _params.get("fire_intensity_factor", _fire_intensity_factor)
         _max_time              = _params.get("max_time", _max_time)
+        _speed_max             = _params.get("speed_max", _speed_max)
+        _speed_min             = _params.get("speed_min", _speed_min)
+        _time_horizon          = _params.get("time_horizon", _time_horizon)
+        _neighbor_dist         = _params.get("neighbor_dist", _neighbor_dist)
+        _max_neighbors         = int(_params.get("max_neighbors", _max_neighbors))
 
     run(sys.argv[1], sys.argv[2],
         fire_spread_speed=_fire_spread_speed,
         fire_intensity_factor=_fire_intensity_factor,
-        max_time=_max_time)
+        max_time=_max_time, speed_min=_speed_min, speed_max=_speed_max, time_horizon=_time_horizon,
+        neighbor_dist=_neighbor_dist, max_neighbors=_max_neighbors)

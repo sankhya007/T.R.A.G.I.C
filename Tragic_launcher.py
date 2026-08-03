@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
-from security_utils import load_zone_config
+from security_utils import WATERSHED_MIN_DISTANCE, load_zone_config, validate_image_path
 
 import numpy as np
 import cv2
@@ -579,6 +579,8 @@ MODEL_URL = (
 )
 # SHA-256 published by Hugging Face for unet.pth at the pinned revision above.
 MODEL_SHA256 = "e8b8b59f9bca756bb933f0a922897001cd5da5062e5501611356d54092f30bd1"
+MODEL_DOWNLOAD_COOLDOWN_SECONDS = 60
+_last_model_download_attempt = 0.0
 
 # ── Drop-zone widget ────────────────────────────────────────────────────────
 
@@ -1107,6 +1109,11 @@ class View1_MapParser(QWidget):
         """Central handler called from both the dropzone and Browse button."""
         if not path:
             return
+        try:
+            path = str(validate_image_path(path))
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(self, "Invalid Image", str(error))
+            return
         self.state.image_path = path
         short = Path(path).name
         self.file_label.setText(short)
@@ -1169,9 +1176,16 @@ class View1_MapParser(QWidget):
             self.max_patches_spin.setValue(ideal)
 
     def _run(self):
+        global _last_model_download_attempt
         if not self.state.image_path:
             return
         if not Path("unet.pth").exists():
+            now = time.monotonic()
+            remaining = MODEL_DOWNLOAD_COOLDOWN_SECONDS - (now - _last_model_download_attempt)
+            if remaining > 0:
+                self.status_label.setText(f"Please wait {int(remaining) + 1}s before retrying the model download.")
+                return
+            _last_model_download_attempt = now
             reply = QMessageBox.question(
                 self, "Model Weights Missing",
                 "unet.pth not found.\n\n"
@@ -1753,9 +1767,9 @@ class View2_ZoneEditor(QWidget):
 
         dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
         dist_norm = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-        # Must match the hardcoded min_distance=40 used in all four sim scripts
+        # Must match the shared watershed spacing used by all simulation scripts.
         # so that zone IDs produced here are the same ones the sim scripts produce
-        coords = peak_local_max(dist_norm, min_distance=40, labels=binary)
+        coords = peak_local_max(dist_norm, min_distance=WATERSHED_MIN_DISTANCE, labels=binary)
         seed_mask = np.zeros(dist_norm.shape, dtype=bool)
         seed_mask[tuple(coords.T)] = True
         markers, _ = ndi.label(seed_mask)
@@ -2267,7 +2281,6 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
 
     runtime_mask = Path("stitched_mask.png")
     runtime_zone_config = Path("zone_config.json")
-    runtime_stitched_config = Path("stitched_mask_zone_config.json")
     runtime_params = Path("output") / "simulation_params.json"
 
     if Path(mask_path).resolve() != runtime_mask.resolve():
@@ -2279,9 +2292,8 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
     # Ensure hazard is included in the config
     zone_config["hazard"] = zone_config.get("hazard", None)
 
-    for target in (runtime_zone_config, runtime_stitched_config):
-        with open(target, "w", encoding="utf-8") as f:
-            json.dump(zone_config, f, indent=2)
+    with open(runtime_zone_config, "w", encoding="utf-8") as f:
+        json.dump(zone_config, f, indent=2)
 
     with open(runtime_params, "w", encoding="utf-8") as f:
         json.dump(params or {}, f, indent=2)
@@ -2291,8 +2303,8 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
 
     script_args = {
         "SFM_evacuation.py": ["stitched_mask.png", "zone_config.json", str(runtime_params)],
-        "RVO_evacuation.py": ["stitched_mask.png", "stitched_mask_zone_config.json", str(runtime_params)],
-        "continuum_evacuation_path.py": ["stitched_mask.png", "stitched_mask_zone_config.json", str(runtime_params)],
+        "RVO_evacuation.py": ["stitched_mask.png", "zone_config.json", str(runtime_params)],
+        "continuum_evacuation_path.py": ["stitched_mask.png", "zone_config.json", str(runtime_params)],
         "CA_evacuation.py": ["stitched_mask.png", "zone_config.json", str(runtime_params)],
     }
     
@@ -2654,14 +2666,12 @@ class View3_Simulation(QWidget):
         import os, shutil
         runtime_mask = Path("stitched_mask.png")
         runtime_zone_config = Path("zone_config.json")
-        runtime_stitched_config = Path("stitched_mask_zone_config.json")
         if Path(self.state.mask_path).resolve() != runtime_mask.resolve():
             shutil.copy2(self.state.mask_path, runtime_mask)
         zone_config = load_zone_config(self.state.zone_config_path)
         zone_config["mask_path"] = str(runtime_mask)
-        for target in (runtime_zone_config, runtime_stitched_config):
-            with open(target, "w", encoding="utf-8") as f:
-                json.dump(zone_config, f, indent=2)
+        with open(runtime_zone_config, "w", encoding="utf-8") as f:
+            json.dump(zone_config, f, indent=2)
 
         def _do_compare(progress_cb=None):
             run_output_dir = (Path("output") / f"compare-{uuid.uuid4().hex}").resolve()

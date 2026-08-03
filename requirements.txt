@@ -1,11 +1,11 @@
-# Headless-only requirements (no GUI).
-# PyQt6 is excluded — the container runs simulations, not the launcher.
-
-numpy
-opencv-python-headless
-scipy
-scikit-image
-torch --index-url https://download.pytorch.org/whl/cpu
-torchvision --index-url https://download.pytorch.org/whl/cpu
-matplotlib
-tqdm
+# Tested dependency set for Python 3.10–3.12. Install PyTorch separately if
+# your platform requires a CUDA- or CPU-specific wheel index.
+numpy==1.26.4
+ezdxf==1.3.4
+opencv-python==4.10.0.84
+PyQt6==6.7.1
+scikit-image==0.24.0
+scipy==1.13.1
+torch==2.4.1
+tqdm==4.66.5
+pytest==8.3.3

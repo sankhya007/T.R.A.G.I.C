@@ -7,14 +7,17 @@ import heapq
 from scipy import ndimage as ndi
 from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
-from security_utils import load_runtime_params, load_zone_config, output_path
+from security_utils import (
+    HAZARD_BLOCK_RADIUS, WATERSHED_MIN_DISTANCE, load_runtime_params,
+    load_zone_config, output_path, validate_image_path,
+)
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 # 
 CFG = {
     "mask_path":    "",
-    "zone_config": "stitched_mask_zone_config.json",
+    "zone_config": "zone_config.json",
     "output":      str(output_path("continuum_agent_paths.png")),
 
     "DT":          0.05,
@@ -42,7 +45,7 @@ CFG = {
     # fire spread — same meaning as in SFM/RVO
     "fire_spread_speed":     1.0,   # multiplier on diffusion rate
     "fire_intensity_factor": 1.0,   # multiplier on growth-to-saturation rate
-    "hazard_block_radius":   90,    # px — permanently avoided zone around hazard
+    "hazard_block_radius":   HAZARD_BLOCK_RADIUS,
 }
 
 
@@ -55,7 +58,7 @@ def apply_runtime_args():
     if len(sys.argv) > 3:
         params_path = Path(sys.argv[3])
         if params_path.exists():
-            params = load_runtime_params(params_path, set(CFG) - {"mask_path", "zone_config", "output", "wall_color", "exit_color"})
+            params = load_runtime_params(params_path, set(CFG) - {"mask_path", "zone_config", "output", "wall_color", "exit_color"}, ignore_unknown=True)
             for key, value in params.items():
                 if key in CFG:
                     CFG[key] = value
@@ -103,7 +106,8 @@ def spread_fire(intensity, walk_mask, ticks_elapsed, speed_mult, growth_mult):
 
 class WalkMap:
     def __init__(self, path):
-        img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+        image_path = validate_image_path(path)
+        img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
         if img is None:
             raise FileNotFoundError(path)
         self.walkable = img < 128
@@ -289,7 +293,7 @@ def rebuild_labels(mask_path):
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k)
     dist   = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
     dn     = cv2.normalize(dist, None, 0, 1.0, cv2.NORM_MINMAX)
-    coords = peak_local_max(dn, min_distance=40, labels=binary)
+    coords = peak_local_max(dn, min_distance=WATERSHED_MIN_DISTANCE, labels=binary)
     sm     = np.zeros(dn.shape, dtype=bool)
     sm[tuple(coords.T)] = True
     markers, _ = ndi.label(sm)

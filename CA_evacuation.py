@@ -5,7 +5,10 @@ import sys
 import numpy as np
 from collections import deque
 from pathlib import Path
-from security_utils import load_runtime_params, load_zone_config, output_path
+from security_utils import (
+    HAZARD_BLOCK_RADIUS, WATERSHED_MIN_DISTANCE, load_runtime_params,
+    load_zone_config, output_path, validate_image_path,
+)
 
 # 
 # CONFIG  — tweak everything here
@@ -34,7 +37,7 @@ CONFIG = {
     # fire spread — same meaning as in SFM/RVO/Continuum
     "fire_spread_speed":     1.0,   # multiplier on diffusion rate
     "fire_intensity_factor": 1.0,   # multiplier on growth-to-saturation rate
-    "hazard_block_radius":   90,    # px — permanently avoided zone around hazard
+    "hazard_block_radius":   HAZARD_BLOCK_RADIUS,
 }
 
 # 8-connected Moore neighbourhood — cardinal first, then diagonal
@@ -66,14 +69,15 @@ def apply_runtime_args():
     if len(sys.argv) > 3:
         params_path = Path(sys.argv[3])
         if params_path.exists():
-            params = load_runtime_params(params_path, set(CONFIG) - {"mask_path", "config_path", "out_image", "out_report"})
+            params = load_runtime_params(params_path, set(CONFIG) - {"mask_path", "config_path", "out_image", "out_report"}, ignore_unknown=True)
             for key, value in params.items():
                 if key in CONFIG:
                     CONFIG[key] = value
 
 
 def load_mask(path):
-    img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    image_path = validate_image_path(path)
+    img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
     if img is None:
         raise FileNotFoundError(f"Cannot load mask: {path}")
     H, W     = img.shape
@@ -147,7 +151,7 @@ def spawn_agents(cfg_data, walkable, walk_u8, cost, exit_zone, agent_wall_min):
     H, W         = walkable.shape
     dist_to_wall = cv2.distanceTransform(walk_u8, cv2.DIST_L2, 5)
     dist_norm    = cv2.normalize(dist_to_wall, None, 0, 1.0, cv2.NORM_MINMAX)
-    coords       = peak_local_max(dist_norm, min_distance=40, labels=walk_u8)
+    coords       = peak_local_max(dist_norm, min_distance=WATERSHED_MIN_DISTANCE, labels=walk_u8)
     seed_mask    = np.zeros(dist_norm.shape, dtype=bool)
     seed_mask[tuple(coords.T)] = True
     markers, _   = ndi.label(seed_mask)

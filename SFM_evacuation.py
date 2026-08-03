@@ -4,7 +4,10 @@ import sys
 import numpy as np
 from collections import deque
 from pathlib import Path
-from security_utils import load_runtime_params, load_zone_config, output_path
+from security_utils import (
+    HAZARD_BLOCK_RADIUS, WATERSHED_MIN_DISTANCE, load_runtime_params,
+    load_zone_config, output_path, validate_image_path,
+)
 
 #  CONFIG 
 MASK_PATH   = Path("stitched_mask.png")
@@ -40,7 +43,11 @@ if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
         "speed_min", "speed_max", "relaxation_time", "agent_strength",
         "wall_strength", "panic_threshold", "max_time",
         "fire_spread_speed", "fire_intensity_factor",
-    })
+    }, ignore_unknown=True)
+    MAX_TIME              = _params.get("max_time", MAX_TIME)
+    RELAXATION_TIME       = _params.get("relaxation_time", RELAXATION_TIME)
+    AA_STRENGTH           = _params.get("agent_strength", AA_STRENGTH)
+    WA_STRENGTH           = _params.get("wall_strength", WA_STRENGTH)
     FIRE_SPREAD_SPEED     = _params.get("fire_spread_speed", FIRE_SPREAD_SPEED)
     FIRE_INTENSITY_FACTOR = _params.get("fire_intensity_factor", FIRE_INTENSITY_FACTOR)
 # 
@@ -50,7 +57,8 @@ if len(sys.argv) > 3 and Path(sys.argv[3]).exists():
 # STEP 1 — Load mask
 # 
 
-img          = cv2.imread(MASK_PATH, cv2.IMREAD_GRAYSCALE)
+MASK_PATH = validate_image_path(MASK_PATH)
+img          = cv2.imread(str(MASK_PATH), cv2.IMREAD_GRAYSCALE)
 H, W         = img.shape
 walkable     = img < 128
 walk_u8      = walkable.astype(np.uint8) * 255
@@ -154,7 +162,6 @@ cfg = load_zone_config(CONFIG_PATH)
 exits = cfg["exits"]
 hazard_cfg = cfg.get("hazard")
 
-HAZARD_BLOCK_RADIUS = 90  # px — permanently avoided zone, bump up if still not enough
 
 routing_walkable = walkable
 hazard_zone = np.zeros((H, W), dtype=bool)
@@ -184,7 +191,7 @@ from skimage.segmentation import watershed
 from skimage.feature import peak_local_max
 
 dist_norm  = cv2.normalize(dist_to_wall, None, 0, 1.0, cv2.NORM_MINMAX)
-coords     = peak_local_max(dist_norm, min_distance=40, labels=walk_u8)
+coords     = peak_local_max(dist_norm, min_distance=WATERSHED_MIN_DISTANCE, labels=walk_u8)
 seed_mask  = np.zeros(dist_norm.shape, dtype=bool)
 seed_mask[tuple(coords.T)] = True
 markers, _ = ndi.label(seed_mask)

@@ -60,13 +60,13 @@ The pipeline has three stages:
 ```bash
 git clone https://github.com/sankhya007/T.R.A.G.I.C
 cd T.R.A.G.I.C
-pip install torch>=2.0.0 opencv-python>=4.8.0 numpy>=1.24.0 scipy>=1.11.0 scikit-image>=0.21.0 PyQt6>=6.5.0
+pip install -r requirements.txt
 ```
 
 No GPU? Use the CPU-only torch wheel:
 ```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-pip install opencv-python numpy scipy scikit-image PyQt6
+pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt --no-deps
 ```
 
 ```bash
