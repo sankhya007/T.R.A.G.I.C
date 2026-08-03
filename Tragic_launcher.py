@@ -563,122 +563,253 @@ class ToastNotification(QFrame):
 
 
 # ══════════════════════════════════════════════════════════
-#  VIEW 1 — MAP PARSER
+#  VIEW 1 — MAP PARSER  (modified sections only)
 # ══════════════════════════════════════════════════════════
 
-PATCH_SIZE = 256  # fixed model input size — must match predict_tiled.py
+PATCH_SIZE  = 256
+MAX_DIRECT  = 2_250_000   # ~1500×1500 — mirrors predict_combined.py
+
+# ── Drop-zone widget ────────────────────────────────────────────────────────
+
+class _DropZone(QLabel):
+    """
+    Drag-and-drop target for image files.
+    Emits file_dropped(str) with the resolved path.
+    """
+    file_dropped = pyqtSignal(str)
+
+    _ACCEPTED = {".png", ".jpg", ".jpeg", ".bmp"}
+
+    def __init__(self):
+        super().__init__("⬆  Drop floorplan here")
+        self.setAcceptDrops(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setFixedHeight(64)
+        self._normal_ss  = (
+            f"border: 2px dashed {DARK['border']}; border-radius: 8px; "
+            f"color: {DARK['subtext']}; font-size: 9pt; background: {DARK['input_bg']};"
+        )
+        self._active_ss  = (
+            f"border: 2px dashed {DARK['accent']}; border-radius: 8px; "
+            f"color: {DARK['accent']}; font-size: 9pt; background: {DARK['card']};"
+        )
+        self.setStyleSheet(self._normal_ss)
+
+    def dragEnterEvent(self, ev):
+        if ev.mimeData().hasUrls():
+            urls = ev.mimeData().urls()
+            if any(Path(u.toLocalFile()).suffix.lower() in self._ACCEPTED
+                   for u in urls):
+                ev.acceptProposedAction()
+                self.setStyleSheet(self._active_ss)
+                return
+        ev.ignore()
+
+    def dragLeaveEvent(self, ev):
+        self.setStyleSheet(self._normal_ss)
+
+    def dropEvent(self, ev):
+        self.setStyleSheet(self._normal_ss)
+        for url in ev.mimeData().urls():
+            path = url.toLocalFile()
+            if Path(path).suffix.lower() in self._ACCEPTED:
+                self.file_dropped.emit(path)
+                return
+
+
+# ── Pill toggle switch ───────────────────────────────────────────────────────
+
+class _ToggleSwitch(QWidget):
+    """
+    iOS-style toggle switch.
+    Exposes .isChecked() and .toggled(bool) to match QCheckBox API.
+    """
+    toggled = pyqtSignal(bool)
+
+    _W, _H, _PAD = 44, 24, 3   # overall size and thumb padding
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._checked = False
+        self.setFixedSize(self._W, self._H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def isChecked(self) -> bool:
+        return self._checked
+
+    def setChecked(self, val: bool):
+        if val != self._checked:
+            self._checked = val
+            self.update()
+            self.toggled.emit(val)
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.setChecked(not self._checked)
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        W, H, PAD = self._W, self._H, self._PAD
+        # track
+        track_color = QColor(DARK["accent2"]) if self._checked else QColor(DARK["border"])
+        p.setBrush(QBrush(track_color))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawRoundedRect(0, 0, W, H, H / 2, H / 2)
+        # thumb
+        thumb_x = W - H + PAD if self._checked else PAD
+        p.setBrush(QBrush(QColor("white")))
+        p.drawEllipse(thumb_x, PAD, H - 2 * PAD, H - 2 * PAD)
 
 
 def _run_predict_tiled(image_path, stride, max_patches, threshold, output_path,
                        progress_cb=None):
-    """
-    Tiled inference — mirrors predict_tiled.py exactly.
+    """Generate a mask using overlapping, Gaussian-blended 256 px tiles."""
+    import torch
+    from model import UNet
 
-    Fixed 256×256 patches, Gaussian-weighted blending, 5% reflective padding,
-    morphological cleanup, and connected-component text removal.
-    stride  — pixel step between patches (lower = smoother, slower).
-    max_patches — hard cap on total patches processed (user-editable).
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = UNet()
+    model.load_state_dict(torch.load("unet.pth", map_location=device))
+    model.to(device)
+    model.eval()
+
+    image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"Could not read image: {image_path}")
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    height, width = image.shape[:2]
+
+    pad_y, pad_x = int(0.05 * height), int(0.05 * width)
+    padded = cv2.copyMakeBorder(
+        image, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REFLECT_101)
+    padded_height, padded_width = padded.shape[:2]
+
+    def positions(dimension):
+        # Include the final position so every source pixel is covered.
+        last = max(0, dimension - PATCH_SIZE)
+        values = list(range(0, last, stride))
+        if not values or values[-1] != last:
+            values.append(last)
+        return values
+
+    tiles = [(y, x) for y in positions(padded_height) for x in positions(padded_width)]
+    if len(tiles) > max_patches:
+        step = len(tiles) / max_patches
+        tiles = [tiles[int(i * step)] for i in range(max_patches)]
+
+    coords = np.linspace(-1, 1, PATCH_SIZE, dtype=np.float32)
+    y_grid, x_grid = np.meshgrid(coords, coords, indexing="ij")
+    weights = np.exp(-(x_grid ** 2 + y_grid ** 2) * 4).astype(np.float32)
+    mask_sum = np.zeros((padded_height, padded_width), dtype=np.float32)
+    weight_sum = np.zeros_like(mask_sum)
+
+    for index, (y, x) in enumerate(tiles, start=1):
+        source_tile = padded[y:y + PATCH_SIZE, x:x + PATCH_SIZE]
+        actual_height, actual_width = source_tile.shape[:2]
+        if actual_height < PATCH_SIZE or actual_width < PATCH_SIZE:
+            source_tile = cv2.copyMakeBorder(
+                source_tile, 0, PATCH_SIZE - actual_height, 0,
+                PATCH_SIZE - actual_width, cv2.BORDER_REFLECT_101)
+
+        tensor = source_tile.astype(np.float32) / 255.0
+        tensor = torch.from_numpy(tensor.transpose(2, 0, 1)).unsqueeze(0).to(device)
+        with torch.no_grad():
+            prediction = torch.sigmoid(model(tensor)).squeeze().cpu().numpy()
+
+        # Small images may make an edge tile smaller than PATCH_SIZE; only
+        # blend the portion that corresponds to real padded-image pixels.
+        prediction = prediction[:actual_height, :actual_width]
+        tile_weights = weights[:actual_height, :actual_width]
+        mask_sum[y:y + actual_height, x:x + actual_width] += prediction * tile_weights
+        weight_sum[y:y + actual_height, x:x + actual_width] += tile_weights
+        if progress_cb:
+            progress_cb(int(index / len(tiles) * 85), f"Patch {index}/{len(tiles)}")
+
+    blended = mask_sum / np.maximum(weight_sum, 1e-8)
+    blended = blended[pad_y:pad_y + height, pad_x:pad_x + width]
+    if progress_cb:
+        progress_cb(88, "Cleaning mask…")
+
+    binary = (blended > threshold).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+    binary = cv2.dilate(binary, np.ones((2, 2), np.uint8), iterations=1)
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    cleaned = np.zeros_like(binary)
+    for label in range(1, count):
+        area = stats[label, cv2.CC_STAT_AREA]
+        component_width = stats[label, cv2.CC_STAT_WIDTH]
+        component_height = stats[label, cv2.CC_STAT_HEIGHT]
+        aspect_ratio = max(component_width, component_height) / (min(component_width, component_height) + 1e-6)
+        if area >= 80 or aspect_ratio >= 3.0:
+            cleaned[labels == label] = 1
+
+    if not cv2.imwrite(output_path, cleaned * 255):
+        raise OSError(f"Could not write mask to: {output_path}")
+    if progress_cb:
+        progress_cb(100, "Mask saved")
+
+
+# ── new helper: run direct (no-tile) inference ──────────────────────────────
+def _run_predict_direct(image_path, threshold, output_path, progress_cb=None):
+    """
+    Direct (no-tiling) inference — mirrors infer_direct() in predict_combined.py.
+    Pads to multiples of 32, single forward pass, strips padding, binarizes.
     """
     import torch
     from model import UNet
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
     model = UNet()
     model.load_state_dict(torch.load("unet.pth", map_location=DEVICE))
     model.to(DEVICE)
     model.eval()
 
-    def preprocess_patch(patch):
-        patch = patch.astype(np.float32) / 255.0
-        patch = np.transpose(patch, (2, 0, 1))
-        return torch.from_numpy(patch).unsqueeze(0).to(DEVICE)
+    if progress_cb:
+        progress_cb(10, "Loading image…")
 
-    def create_weight_map(size):
-        y, x = np.ogrid[-1:1:size*1j, -1:1:size*1j]
-        return np.exp(-(x**2 + y**2) * 4).astype(np.float32)
-
-    # ── load and pad ────────────────────────────────────────────────────────
     img = cv2.imread(image_path)
     if img is None:
         raise ValueError(f"Could not read image: {image_path}")
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    H, W, _ = img.shape
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    H, W    = img_rgb.shape[:2]
 
-    pad_h, pad_w = int(0.05 * H), int(0.05 * W)
-    img_pad = cv2.copyMakeBorder(img, pad_h, pad_h, pad_w, pad_w,
-                                 cv2.BORDER_REFLECT_101)
-    padded_H, padded_W, _ = img_pad.shape
-
-    # ── build tile grid ─────────────────────────────────────────────────────
-    def make_positions(dim):
-        pos = list(range(0, dim - PATCH_SIZE, stride))
-        if not pos or pos[-1] != dim - PATCH_SIZE:
-            pos.append(max(0, dim - PATCH_SIZE))
-        return pos
-
-    y_positions = make_positions(padded_H)
-    x_positions = make_positions(padded_W)
-    # flatten to (y, x) pairs and cap at max_patches
-    all_positions = [(y, x) for y in y_positions for x in x_positions]
-    if len(all_positions) > max_patches:
-        # evenly sub-sample to stay within the cap
-        step = len(all_positions) / max_patches
-        all_positions = [all_positions[int(i * step)] for i in range(max_patches)]
-    total = len(all_positions)
-
-    wmap       = create_weight_map(PATCH_SIZE)
-    final_mask = np.zeros((padded_H, padded_W), dtype=np.float32)
-    weight_sum = np.zeros((padded_H, padded_W), dtype=np.float32)
-    done = 0
-
-    # ── inference loop ───────────────────────────────────────────────────────
-    for y1, x1 in all_positions:
-            patch = img_pad[y1:y1+PATCH_SIZE, x1:x1+PATCH_SIZE]
-            # guard against edge patches smaller than PATCH_SIZE
-            ph = PATCH_SIZE - patch.shape[0]
-            pw = PATCH_SIZE - patch.shape[1]
-            if ph > 0 or pw > 0:
-                patch = cv2.copyMakeBorder(patch, 0, ph, 0, pw,
-                                           cv2.BORDER_REFLECT_101)
-
-            t = preprocess_patch(patch)
-            with torch.no_grad():
-                pred = model(t)
-            pred = torch.sigmoid(pred).squeeze().cpu().numpy()
-            pred = np.clip(pred, 0.05, 0.95)
-
-            final_mask[y1:y1+PATCH_SIZE, x1:x1+PATCH_SIZE] += pred * wmap
-            weight_sum[y1:y1+PATCH_SIZE, x1:x1+PATCH_SIZE] += wmap
-            done += 1
-            if progress_cb:
-                progress_cb(int(done / total * 85), f"Patch {done}/{total}")
-
-    # ── normalize and unpad ──────────────────────────────────────────────────
-    weight_sum[weight_sum == 0] = 1e-8
-    final_mask = final_mask / weight_sum
-    final_mask = final_mask[pad_h:pad_h + H, pad_w:pad_w + W]
+    pad_h = (32 - H % 32) % 32
+    pad_w = (32 - W % 32) % 32
+    padded = cv2.copyMakeBorder(img_rgb, 0, pad_h, 0, pad_w, cv2.BORDER_REFLECT_101)
 
     if progress_cb:
-        progress_cb(88, "Cleaning mask...")
+        progress_cb(30, "Running direct inference…")
 
-    # ── binarize + morphological cleanup ────────────────────────────────────
-    binary = (final_mask > threshold).astype(np.uint8)
+    t = padded.astype(np.float32) / 255.0
+    t = torch.from_numpy(t).permute(2, 0, 1).unsqueeze(0).to(DEVICE)
+    with torch.no_grad():
+        pred = model(t)
+    pred = torch.sigmoid(pred).squeeze().cpu().numpy()
+    pred = pred[:H, :W]
+
+    if progress_cb:
+        progress_cb(80, "Cleaning mask…")
+
+    binary = (pred > threshold).astype(np.uint8)
     k = np.ones((3, 3), np.uint8)
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k)
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k)
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  k)
     binary = cv2.dilate(binary, np.ones((2, 2), np.uint8), iterations=1)
 
-    # ── remove small square text/symbol blobs ────────────────────────────────
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
-        binary, connectivity=8)
+    # remove small text/symbol blobs
+    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     cleaned = np.zeros_like(binary)
+    min_area = (H * W) * 0.00005
     for i in range(1, num_labels):
         area  = stats[i, cv2.CC_STAT_AREA]
         w_box = stats[i, cv2.CC_STAT_WIDTH]
         h_box = stats[i, cv2.CC_STAT_HEIGHT]
         aspect = max(w_box, h_box) / (min(w_box, h_box) + 1e-6)
-        if area < 80 and aspect < 3.0:
+        if area < min_area and aspect < 3.0:
             continue
         cleaned[labels == i] = 1
     binary = cleaned
@@ -693,9 +824,12 @@ class View1_MapParser(QWidget):
 
     def __init__(self, state: AppState):
         super().__init__()
-        self.state = state
+        self.state  = state
         self._worker: Optional[Worker] = None
+        self._img_pixels: int = 0          # cached pixel count of loaded image
         self._build_ui()
+
+    # ── UI CONSTRUCTION ────────────────────────────────────────────────────────
 
     def _build_ui(self):
         root = QHBoxLayout(self)
@@ -716,27 +850,59 @@ class View1_MapParser(QWidget):
         lv.addWidget(sub)
         lv.addWidget(self._sep())
 
-        # File selector
-        lv.addWidget(QLabel("Input Image:").setParent(None) or QLabel("Input Image:"))
+        # ── Dropzone / upload ────────────────────────────
+        lv.addWidget(self._section_label("INPUT IMAGE"))
+
+        self.dropzone = _DropZone()
+        self.dropzone.file_dropped.connect(self._on_file_chosen)
+        lv.addWidget(self.dropzone)
+
         file_row = QHBoxLayout()
         self.file_label = QLabel("No file selected")
         self.file_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 9pt;")
         self.file_label.setWordWrap(True)
-        self.browse_btn = QPushButton("Browse")
+        self.browse_btn = QPushButton("Browse…")
         self.browse_btn.setFixedWidth(80)
         self.browse_btn.clicked.connect(self._browse)
         file_row.addWidget(self.file_label, 1)
         file_row.addWidget(self.browse_btn)
         lv.addLayout(file_row)
 
+        self.res_label = QLabel("")
+        self.res_label.setStyleSheet(f"color: {DARK['subtext']}; font-size: 8pt;")
+        lv.addWidget(self.res_label)
+
         self.load_mask_btn = QPushButton("Load Existing Mask")
         self.load_mask_btn.clicked.connect(self._load_existing_mask)
         lv.addWidget(self.load_mask_btn)
 
         lv.addWidget(self._sep())
+
+        # ── Force-tiled toggle ───────────────────────────
+        toggle_row = QHBoxLayout()
+        toggle_lbl = QLabel("Force Tiled Parsing (STITCH Framework)")
+        toggle_lbl.setStyleSheet(f"color: {DARK['text']}; font-size: 9pt;")
+        toggle_lbl.setWordWrap(True)
+
+        self.stitch_toggle = _ToggleSwitch()
+        self.stitch_toggle.toggled.connect(self._on_mode_changed)
+
+        toggle_row.addWidget(toggle_lbl, 1)
+        toggle_row.addWidget(self.stitch_toggle)
+        lv.addLayout(toggle_row)
+
+        # mode indicator badge
+        self.mode_badge = QLabel("AUTO")
+        self.mode_badge.setObjectName("badge")
+        self.mode_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mode_badge.setFixedWidth(90)
+        lv.addWidget(self.mode_badge)
+
+        lv.addWidget(self._sep())
+
+        # ── Tiling parameters ────────────────────────────
         lv.addWidget(self._section_label("TILING PARAMETERS"))
 
-        # Parameters — fixed 256×256 patches (matches predict_tiled.py)
         form = QFormLayout()
         form.setSpacing(8)
 
@@ -755,7 +921,7 @@ class View1_MapParser(QWidget):
         self.max_patches_spin.setValue(40)
         self.max_patches_spin.setToolTip(
             "Auto-filled on image load with the ideal patch count for this "
-            "image size and stride. Override manually if you want to cap it.")
+            "image size and stride. Override manually to cap processing.")
         form.addRow("Max Patches:", self.max_patches_spin)
 
         self.threshold_spin = QDoubleSpinBox()
@@ -767,6 +933,12 @@ class View1_MapParser(QWidget):
         form.addRow("Threshold:", self.threshold_spin)
 
         lv.addLayout(form)
+
+        # collect tiling widgets so we can enable/disable them together
+        self._tiling_widgets = [
+            self.stride_spin, self.max_patches_spin, self.threshold_spin,
+        ]
+
         lv.addWidget(self._sep())
 
         self.run_btn = QPushButton("Run Parser")
@@ -786,15 +958,15 @@ class View1_MapParser(QWidget):
 
         lv.addStretch()
         lv.addWidget(self._sep())
-        
+
         btn_row = QHBoxLayout()
         self.tweak_btn = QPushButton("↺ Re-run")
-        self.tweak_btn.setToolTip("Adjust the parameters above and click this to run the parser again.")
+        self.tweak_btn.setToolTip("Adjust the parameters above and click to re-run the parser.")
         self.tweak_btn.setVisible(False)
         self.tweak_btn.clicked.connect(self._run)
 
         self.debug_btn = QPushButton("🔍 Debug Mask")
-        self.debug_btn.setToolTip("Apply Gaussian blur + re-threshold to clean up the mask. Zone editor will use the cleaned version.")
+        self.debug_btn.setToolTip("Gaussian blur + re-threshold to clean up the mask.")
         self.debug_btn.setVisible(False)
         self.debug_btn.clicked.connect(self._debug_mask)
 
@@ -821,13 +993,12 @@ class View1_MapParser(QWidget):
         self.reset_zoom_btn.setFixedWidth(50)
         self.reset_zoom_btn.clicked.connect(lambda: self.preview.reset_zoom())
 
-        # compare toggle — shown only after a mask exists
         self.compare_btn = QPushButton("⇄ Show Original")
         self.compare_btn.setCheckable(True)
         self.compare_btn.setVisible(False)
-        self.compare_btn.setToolTip("Toggle between the binary mask and the original floorplan for comparison")
+        self.compare_btn.setToolTip("Toggle between the binary mask and the original floorplan")
         self.compare_btn.clicked.connect(self._toggle_compare)
-        self._showing_mask = True   # track which image is currently displayed
+        self._showing_mask = True
 
         self.edit_btn = QPushButton("✏ Edit Mask")
         self.edit_btn.setCheckable(True)
@@ -855,7 +1026,10 @@ class View1_MapParser(QWidget):
         preview_header.addWidget(self.reset_zoom_btn)
         rv.addLayout(preview_header)
 
-        self.preview = EditableImageView("Run the parser to see the output mask here.\nWhite = walls  |  Black = walkable space")
+        self.preview = EditableImageView(
+            "Run the parser to see the output mask here.\n"
+            "White = walls  |  Black = walkable space"
+        )
         rv.addWidget(self.preview)
 
         self.preview_info = QLabel("")
@@ -864,6 +1038,11 @@ class View1_MapParser(QWidget):
 
         root.addWidget(left)
         root.addWidget(right, 1)
+
+        # initial state: no image loaded → apply correct enabled states
+        self._apply_mode_state()
+
+    # ── helpers ────────────────────────────────────────────────────────────────
 
     def _sep(self):
         f = QFrame(); f.setFrameShape(QFrame.Shape.HLine)
@@ -874,28 +1053,87 @@ class View1_MapParser(QWidget):
         l = QLabel(text); l.setObjectName("section")
         return l
 
+    def _use_tiled(self) -> bool:
+        """True if tiled mode should be used (toggle forced ON, or image over threshold)."""
+        return self.stitch_toggle.isChecked() or self._img_pixels > MAX_DIRECT
 
-    def _toggle_compare(self, checked):
-        """Switch the preview between the binary mask and the original floorplan."""
-        if checked:
-            if self.state.image_path and Path(self.state.image_path).exists():
-                self.preview.load_image(self.state.image_path)
-            self.compare_btn.setText("⇄ Show Mask")
-            self.preview_title.setText("Output Preview — Original")
-            self._showing_mask = False
-            self.edit_btn.setEnabled(False)
-            self.save_edits_btn.setEnabled(False)
+    def _apply_mode_state(self):
+        """
+        Enable / disable tiling parameter inputs and update the mode badge
+        depending on image resolution and the force-tiled toggle.
+        """
+        tiled = self._use_tiled()
+        for w in self._tiling_widgets:
+            w.setEnabled(tiled)
+
+        if not self.state.image_path:
+            # no image yet — neutral badge
+            self.mode_badge.setText("AUTO")
+            self.mode_badge.setStyleSheet(
+                f"background: {DARK['border']}; color: {DARK['subtext']}; "
+                "border-radius: 10px; padding: 2px 10px; font-size: 9pt; font-weight: bold;"
+            )
+            return
+
+        if self.stitch_toggle.isChecked():
+            label, color = "STITCH (FORCED)", DARK["accent2"]
+        elif self._img_pixels > MAX_DIRECT:
+            label, color = "STITCH (AUTO)",   DARK["warning"]
         else:
-            if self.state.mask_path and Path(self.state.mask_path).exists():
-                self.preview.load_canvas(self.state.mask_path)
-            self.compare_btn.setText("⇄ Show Original")
-            self.preview_title.setText("Output Preview — Mask")
-            self._showing_mask = True
-            self.edit_btn.setEnabled(True)
-            self.save_edits_btn.setEnabled(True)
+            label, color = "DIRECT",          DARK["success"]
+
+        self.mode_badge.setText(label)
+        self.mode_badge.setStyleSheet(
+            f"background: {color}; color: white; border-radius: 10px; "
+            "padding: 2px 10px; font-size: 9pt; font-weight: bold;"
+        )
+
+    # ── signal handlers ────────────────────────────────────────────────────────
+
+    def _on_file_chosen(self, path: str):
+        """Central handler called from both the dropzone and Browse button."""
+        if not path:
+            return
+        self.state.image_path = path
+        short = Path(path).name
+        self.file_label.setText(short)
+        self.file_label.setStyleSheet(f"color: {DARK['text']}; font-size: 9pt;")
+        self.run_btn.setEnabled(True)
+        self.tweak_btn.setVisible(False)
+        self.proceed_btn.setVisible(False)
+        self.preview_info.setText("")
+
+        # measure resolution
+        img = cv2.imread(path)
+        if img is not None:
+            H, W = img.shape[:2]
+            self._img_pixels = H * W
+            self.res_label.setText(
+                f"Resolution: {W}×{H}  ({self._img_pixels:,} px)  "
+                f"— threshold {MAX_DIRECT:,} px"
+            )
+            # auto-fill ideal patch count
+            ideal = self._compute_ideal_patches(path, self.stride_spin.value())
+            self.max_patches_spin.setValue(ideal)
+        else:
+            self._img_pixels = 0
+            self.res_label.setText("")
+
+        self._apply_mode_state()
+        self.preview.load_image(path)   # show original before parsing
+
+    def _browse(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Floorplan Image", "",
+            "Images (*.png *.jpg *.jpeg *.bmp)")
+        if path:
+            self._on_file_chosen(path)
+
+    def _on_mode_changed(self, _checked: bool):
+        """Called when the STITCH toggle is flipped."""
+        self._apply_mode_state()
 
     def _compute_ideal_patches(self, image_path, stride):
-        """Return the natural patch count for this image + stride (no cap)."""
         img = cv2.imread(image_path)
         if img is None:
             return 40
@@ -912,30 +1150,11 @@ class View1_MapParser(QWidget):
         return max(1, n_pos(pH) * n_pos(pW))
 
     def _refresh_ideal_patches(self):
-        """Recompute and update the Max Patches field whenever stride changes."""
         if self.state.image_path:
             ideal = self._compute_ideal_patches(
                 self.state.image_path, self.stride_spin.value())
             self.max_patches_spin.setValue(ideal)
 
-    def _browse(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Floorplan Image", "",
-            "Images (*.png *.jpg *.jpeg *.bmp)")
-        if path:
-            self.state.image_path = path
-            short = Path(path).name
-            self.file_label.setText(short)
-            self.file_label.setStyleSheet(f"color: {DARK['text']}; font-size: 9pt;")
-            self.run_btn.setEnabled(True)
-            self.tweak_btn.setVisible(False)
-            self.proceed_btn.setVisible(False)
-            self.preview_info.setText("")
-            # auto-fill ideal patch count for this image + current stride
-            ideal = self._compute_ideal_patches(path, self.stride_spin.value())
-            self.max_patches_spin.setValue(ideal)
-            self.preview.load_image(path)  # show original before parsing
-            
     def _run(self):
         if not self.state.image_path:
             return
@@ -951,7 +1170,7 @@ class View1_MapParser(QWidget):
             if reply != QMessageBox.StandardButton.Yes:
                 return
             self.run_btn.setEnabled(False)
-            self.status_label.setText("Downloading unet.pth...")
+            self.status_label.setText("Downloading unet.pth…")
             self.status_label.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
             self.progress_bar.setVisible(True)
             self.progress_bar.setValue(0)
@@ -976,7 +1195,7 @@ class View1_MapParser(QWidget):
                             downloaded += len(buf)
                             if total and progress_cb:
                                 progress_cb(int(downloaded / total * 100),
-                                            f"Downloading... {downloaded // 1024 // 1024} MB")
+                                            f"Downloading… {downloaded // 1024 // 1024} MB")
                 if progress_cb:
                     progress_cb(100, "Download complete")
 
@@ -996,26 +1215,38 @@ class View1_MapParser(QWidget):
         self.proceed_btn.setVisible(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
-        self.status_label.setText("Starting...")
 
-        #output = str(Path(self.state.image_path).parent / "stitched_mask.png")
-        # if you want to directly fetch the image from the parser view 1 to the parser view 2 then use the line up above 
         output = str(Path(__file__).parent / "stitched_mask.png")
-        # this line will save the mask in the same directory as the script, so you can easily access it later and then the view 2 will load it from there.
-        
         self.state.mask_path = output
 
-        self._worker = Worker(
-            _run_predict_tiled,
-            self.state.image_path,
-            self.stride_spin.value(),
-            self.max_patches_spin.value(),
-            self.threshold_spin.value(),
-            output,
-        )
+        # ── choose inference mode ────────────────────────────────────────────
+        if self._use_tiled():
+            mode_str = (
+                "STITCH (forced)" if self.stitch_toggle.isChecked()
+                else f"STITCH (image {self._img_pixels:,} px > threshold)"
+            )
+            self.status_label.setText(f"Mode: {mode_str}")
+            self._worker = Worker(
+                _run_predict_tiled,
+                self.state.image_path,
+                self.stride_spin.value(),
+                self.max_patches_spin.value(),
+                self.threshold_spin.value(),
+                output,
+            )
+        else:
+            self.status_label.setText("Mode: Direct (single-pass inference)")
+            self._worker = Worker(
+                _run_predict_direct,
+                self.state.image_path,
+                self.threshold_spin.value(),
+                output,
+            )
+
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_done)
         self._worker.start()
+
 
     def _on_progress(self, pct, msg):
         self.progress_bar.setValue(pct)
@@ -1084,6 +1315,28 @@ class View1_MapParser(QWidget):
         )
         self.status_label.setText("Debug mask applied — proceed when ready")
         self.status_label.setStyleSheet(f"color: {DARK['warning']}; font-size: 9pt;")
+
+    def _toggle_compare(self, checked):
+        """Switch the preview between the generated mask and source floorplan."""
+        if checked:
+            if not self.state.image_path or not Path(self.state.image_path).exists():
+                # A mask loaded without its source image cannot be compared.
+                self.compare_btn.setChecked(False)
+                return
+            self.preview.load_image(self.state.image_path)
+            self.compare_btn.setText("⇄ Show Mask")
+            self.preview_title.setText("Output Preview — Original")
+            self._showing_mask = False
+            self.edit_btn.setEnabled(False)
+            self.save_edits_btn.setEnabled(False)
+        else:
+            if self.state.mask_path and Path(self.state.mask_path).exists():
+                self.preview.load_canvas(self.state.mask_path)
+            self.compare_btn.setText("⇄ Show Original")
+            self.preview_title.setText("Output Preview — Mask")
+            self._showing_mask = True
+            self.edit_btn.setEnabled(True)
+            self.save_edits_btn.setEnabled(True)
 
     def _toggle_edit(self, checked):
         self.preview.edit_mode = checked
