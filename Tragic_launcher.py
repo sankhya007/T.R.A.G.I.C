@@ -2304,7 +2304,9 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
 
     run_output_dir = (Path("output") / f"run-{uuid.uuid4().hex}").resolve()
     run_output_dir.mkdir(mode=0o700, parents=True)
-    proc = subprocess.Popen(
+    pct = 10
+    output_lines = []
+    with subprocess.Popen(
         _resolve_runner(script_name) + script_args.get(script_name, []),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -2314,25 +2316,22 @@ def _run_simulation(script_name, params, mask_path, zone_config_path,
         cwd=Path(__file__).resolve().parent,
         shell=False,
         env={**os.environ, "PYTHONIOENCODING": "utf-8", "TRAGIC_OUTPUT_DIR": str(run_output_dir)},
-    )
+    ) as proc:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.strip()
+            if line:
+                output_lines.append(line)
+                pct = min(pct + 2, 90)
+                if progress_cb:
+                    progress_cb(pct, line[:80])
+        returncode = proc.wait()
 
-    pct = 10
-    output_lines = []
-    for line in proc.stdout:
-        line = line.strip()
-        if line:
-            output_lines.append(line)
-            pct = min(pct + 2, 90)
-            if progress_cb:
-                progress_cb(pct, line[:80])
-
-    proc.wait()
-
-    if proc.returncode != 0:
+    if returncode != 0:
         detail = "\n".join(output_lines[-10:])
         if detail:
-            raise RuntimeError(f"{script_name} exited with code {proc.returncode}\n{detail}")
-        raise RuntimeError(f"{script_name} exited with code {proc.returncode}")
+            raise RuntimeError(f"{script_name} exited with code {returncode}\n{detail}")
+        raise RuntimeError(f"{script_name} exited with code {returncode}")
 
     # where each script actually writes its image output
     script_outputs = {
@@ -2667,7 +2666,8 @@ class View3_Simulation(QWidget):
         def _do_compare(progress_cb=None):
             run_output_dir = (Path("output") / f"compare-{uuid.uuid4().hex}").resolve()
             run_output_dir.mkdir(mode=0o700, parents=True)
-            proc = subprocess.Popen(
+            pct = 0
+            with subprocess.Popen(
                 [sys.executable, "compare_models.py", "stitched_mask.png", "zone_config.json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -2677,16 +2677,16 @@ class View3_Simulation(QWidget):
                 cwd=Path(__file__).resolve().parent,
                 shell=False,
                 env={**os.environ, "PYTHONIOENCODING": "utf-8", "TRAGIC_OUTPUT_DIR": str(run_output_dir)},
-            )
-            pct = 0
-            for line in proc.stdout:
-                line = line.strip()
-                if line and progress_cb:
-                    pct = min(pct + 3, 95)
-                    progress_cb(pct, line[:80])
-            proc.wait()
-            if proc.returncode != 0:
-                raise RuntimeError(f"compare_models.py exited with code {proc.returncode}")
+            ) as proc:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    line = line.strip()
+                    if line and progress_cb:
+                        pct = min(pct + 3, 95)
+                        progress_cb(pct, line[:80])
+                returncode = proc.wait()
+            if returncode != 0:
+                raise RuntimeError(f"compare_models.py exited with code {returncode}")
             if progress_cb:
                 progress_cb(100, "Done")
 
